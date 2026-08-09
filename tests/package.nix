@@ -76,6 +76,12 @@
         exit 1
       fi
 
+      rpath="$(patchelf --print-rpath ${ampinstmgr}/opt/cubecoders/amp/.ampinstmgr-wrapped)"
+      case ":$rpath:" in
+        *":${pkgs.lib.getLib pkgs.openssl}/lib:"*) ;;
+        *) echo "OpenSSL runtime path missing: $rpath" >&2; exit 1 ;;
+      esac
+
       export HOME="$TMPDIR/home"
       export XDG_CONFIG_HOME="$HOME/.config"
       export XDG_DATA_HOME="$HOME/.local/share"

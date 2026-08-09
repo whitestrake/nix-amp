@@ -11,6 +11,7 @@
   gnutar,
   icu,
   numactl,
+  openssl,
   socat,
   tmux,
   unzip,
@@ -40,7 +41,10 @@ stdenv.mkDerivation (finalAttrs: {
     zlib
   ];
 
-  runtimeDependencies = [icu];
+  runtimeDependencies = [
+    icu
+    (lib.getLib openssl)
+  ];
 
   dontConfigure = true;
   dontBuild = true;
