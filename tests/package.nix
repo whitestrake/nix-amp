@@ -13,7 +13,7 @@ pkgs.runCommand "ampinstmgr-package-contract"
   ];
 }
 ''
-  set -euo pipefail
+  set -euxo pipefail
 
   test "$(id -u)" -ne 0
 
