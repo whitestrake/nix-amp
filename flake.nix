@@ -33,8 +33,25 @@
       default = ampinstmgr;
     };
 
+    overlays.default = final: _prev: {
+      ampinstmgr = final.callPackage ./package.nix {};
+    };
+
+    nixosModules = rec {
+      amp = {lib, ...}: {
+        imports = [./module.nix];
+        services.amp.package =
+          lib.mkDefault self.packages.${system}.ampinstmgr;
+      };
+      default = amp;
+    };
+
     checks.${system} =
-      import ./tests {inherit pkgs ampinstmgr;}
+      import ./tests {
+        inherit pkgs ampinstmgr;
+        ampModule = ./module.nix;
+        lib = nixpkgs.lib;
+      }
       // {
         formatting = treefmt.config.build.check self;
       };
