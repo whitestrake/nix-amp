@@ -136,10 +136,11 @@
       machine.fail(
           r"""grep -hE 'execve\("([^"]*/)?(apt|apt-get|systemctl|docker|podman)"' /tmp/amp.trace.*"""
       )
-      machine.fail(
+      writes = machine.succeed(
           r"""grep -hE '(open|openat)\([^\\n]*(O_WRONLY|O_RDWR|O_CREAT)|(^|[[:space:]])(mkdir|mkdirat|unlink|unlinkat|rename|renameat)\(' /tmp/amp.trace.* """
-          r"""| grep -Ev '(/var/lib/amp-spike|/tmp/|/run/|/dev/null)'"""
+          r"""| grep -Ev '(/var/lib/amp-spike|/tmp/|/run/|/dev/null)' || true"""
       )
+      assert not writes.strip(), writes
     '';
   };
 in {
