@@ -9,6 +9,7 @@
   coreutils,
   git,
   gnutar,
+  icu,
   numactl,
   socat,
   tmux,
@@ -34,9 +35,12 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   buildInputs = [
+    icu
     stdenv.cc.cc.lib
     zlib
   ];
+
+  runtimeDependencies = [icu];
 
   dontConfigure = true;
   dontBuild = true;
