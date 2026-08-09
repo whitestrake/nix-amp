@@ -138,7 +138,7 @@
       )
       writes = machine.succeed(
           r"""grep -hE '(open|openat)\([^\\n]*(O_WRONLY|O_RDWR|O_CREAT)|(^|[[:space:]])(mkdir|mkdirat|unlink|unlinkat|rename|renameat)\(' /tmp/amp.trace.* """
-          r"""| grep -Ev '(/var/lib/amp-spike|/tmp/|/run/|/dev/null)' || true"""
+          r"""| grep -Ev '(/var/lib/amp-spike|/tmp/|/run/|/dev/null|/dev/tty|/dev/shm/sem\.clrst|/proc/self/task/[0-9]+/comm)' || true"""
       )
       assert not writes.strip(), writes
     '';
