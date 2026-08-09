@@ -63,7 +63,7 @@ pkgs.runCommand "ampinstmgr-package-contract"
     test -f "${ampinstmgr}/share/ampinstmgr/upstream-systemd/$unit"
   done
 
-  file ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr | grep -F 'ELF 64-bit LSB'
+  file ${ampinstmgr}/opt/cubecoders/amp/.ampinstmgr-wrapped | grep -F 'ELF 64-bit LSB'
 
   interpreter="$(patchelf --print-interpreter ${ampinstmgr}/opt/cubecoders/amp/.ampinstmgr-wrapped)"
   case "$interpreter" in
