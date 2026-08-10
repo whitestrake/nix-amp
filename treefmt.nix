@@ -33,5 +33,9 @@
     };
 
     formatter.shellcheck.options = ["-x"];
+    formatter.actionlint.options = [
+      "-config-file"
+      ".github/actionlint.yaml"
+    ];
   };
 }

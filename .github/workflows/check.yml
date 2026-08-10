@@ -12,7 +12,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@v22
+      - run: nix fmt -- --ci
+      - run: nix flake check --no-build
       - run: nix flake check --print-build-logs

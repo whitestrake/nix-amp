@@ -58,10 +58,24 @@
       test -x ${ampinstmgr}/opt/cubecoders/amp/ioredir.so
       test ! -e ${ampinstmgr}/bin/getamp
       test ! -e ${ampinstmgr}/opt/cubecoders/amp/getamp
+      grep -F "cd '${ampinstmgr}/opt/cubecoders/amp'" \
+        ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
+      grep -F '${pkgs.stdenv.cc.bintools.dynamicLinker}' \
+        ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
+      grep -F '${pkgs.lib.makeLibraryPath [
+        pkgs.icu
+        (pkgs.lib.getLib pkgs.openssl)
+        pkgs.stdenv.cc.cc.lib
+        pkgs.zlib
+      ]}' \
+        ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
 
       test -f ${ampinstmgr}/share/ampinstmgr/ampinstmgr.conf
       for unit in ampfirewall.service ampfirewall.timer ampinstmgr.service amptasks.service amptasks.timer; do
-        test -f "${ampinstmgr}/share/ampinstmgr/upstream-systemd/$unit"
+        test -f "${ampinstmgr}/lib/systemd/system/$unit"
+        cmp \
+          "etc/systemd/system/$unit" \
+          "${ampinstmgr}/lib/systemd/system/$unit"
       done
 
       file ${ampinstmgr}/opt/cubecoders/amp/.ampinstmgr-wrapped | grep -F 'ELF 64-bit LSB'

@@ -1,0 +1,176 @@
+name: Update AMP
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: update-amp
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.WHITESTRAKE_BOT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WHITESTRAKE_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Discover and download the latest TGZ
+        id: release
+        run: |
+          set -euo pipefail
+
+          parser=$(
+            nix build .#ampinstmgr.versionParser \
+              --no-link \
+              --print-out-paths
+          )
+          index=$(mktemp)
+          curl -fsSL https://repo.cubecoders.com/ > "$index"
+          version=$("$parser" < "$index" | tail -n 1)
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+
+          asset="ampinstmgr-$version.x86_64.tgz"
+          mkdir upstream verification
+
+          curl -fsSL \
+            "https://repo.cubecoders.com/$asset" \
+            -o "upstream/$asset"
+          curl -fsSL \
+            "https://repo.cubecoders.com/$asset" \
+            -o "verification/$asset"
+          cmp "upstream/$asset" "verification/$asset"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Update package
+        id: update
+        run: |
+          set -euo pipefail
+
+          nix run nixpkgs#nix-update -- \
+            --flake \
+            --use-update-script \
+            ampinstmgr
+
+          if test -L result && [[ "$(readlink result)" == /nix/store/* ]]; then
+            rm result
+          else
+            test ! -e result
+          fi
+
+          status=$(git status --porcelain=v1 --untracked-files=all)
+          if test -z "$status"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          test "$status" = " M package.nix"
+          if git diff --unified=0 -- package.nix |
+            grep -E '^[+-]' |
+            grep -Ev '^(\+\+\+|---|[+-][[:space:]]+(version|hash)[[:space:]]*=)'; then
+            echo "nix-update changed more than version and hash" >&2
+            exit 1
+          fi
+
+          nix fmt
+          test "$(git status --porcelain=v1 --untracked-files=all)" = " M package.nix"
+          if git diff --unified=0 -- package.nix |
+            grep -E '^[+-]' |
+            grep -Ev '^(\+\+\+|---|[+-][[:space:]]+(version|hash)[[:space:]]*=)'; then
+            echo "formatting changed more than version and hash" >&2
+            exit 1
+          fi
+          nix fmt -- --ci
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify and mirror the TGZ
+        id: mirror
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          ASSET: ${{ steps.release.outputs.asset }}
+        run: |
+          set -euo pipefail
+
+          test "$(
+            sed -n 's/^[[:space:]]*version = "\([^"]*\)";$/\1/p' package.nix
+          )" = "$VERSION"
+          expected=$(
+            sed -n 's/^[[:space:]]*hash = "\(sha256-[^"]*\)";$/\1/p' package.nix
+          )
+          test -n "$expected"
+          test "$(nix hash file "upstream/$ASSET")" = "$expected"
+
+          tag="upstream-ampinstmgr-$VERSION"
+          mkdir existing
+          publish=false
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release download "$tag" --pattern "$ASSET" --dir existing
+            cmp "upstream/$ASSET" "existing/$ASSET"
+            if test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true; then
+              publish=true
+            fi
+          else
+            gh release create "$tag" "upstream/$ASSET#$ASSET" \
+              --draft \
+              --target "$(git rev-parse HEAD)" \
+              --title "AMP Instance Manager $VERSION" \
+              --notes "Unmodified CubeCoders AMP Instance Manager x86_64 TGZ."
+            gh release download "$tag" --pattern "$ASSET" --dir existing
+            cmp "upstream/$ASSET" "existing/$ASSET"
+            publish=true
+          fi
+
+          if test "$publish" = true; then
+            gh release edit "$tag" --draft=false
+          fi
+
+      - name: Test candidate
+        id: checks
+        if: steps.update.outputs.changed == 'true'
+        continue-on-error: true
+        run: nix flake check --print-build-logs
+
+      - name: Create pull request
+        if: >-
+          always() &&
+          steps.update.outputs.changed == 'true' &&
+          steps.mirror.outcome == 'success'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: nix-update/ampinstmgr
+          delete-branch: true
+          commit-message: "chore(package): update ampinstmgr"
+          title: "chore(package): update ampinstmgr"
+          body: |
+            Updates AMP Instance Manager to `${{ steps.release.outputs.version }}`.
+
+            The upstream TGZ was downloaded twice, compared byte-for-byte,
+            and mirrored unchanged as a GitHub Release asset.
+          labels: dependencies
+
+      - name: Require successful checks
+        if: always() && steps.update.outputs.changed == 'true'
+        env:
+          CHECKS_OUTCOME: ${{ steps.checks.outcome }}
+        run: test "$CHECKS_OUTCOME" = success

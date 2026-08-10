@@ -5,7 +5,9 @@
   ...
 }: let
   cfg = config.services.amp;
+  ampRoot = "${cfg.package}/opt/cubecoders/amp";
   ampinstmgr = lib.getExe' cfg.package "ampinstmgr";
+  servicePath = [cfg.package "/run/wrappers"];
   runtimeLibraries = with pkgs; [
     icu
     openssl
@@ -53,6 +55,8 @@ in {
         default = "5m";
         description = "Systemd interval between AMP firewall synchronizations.";
       };
+
+      podman = lib.mkEnableOption "immediate AMP firewall synchronization after Podman container events";
     };
   };
 
@@ -78,6 +82,7 @@ in {
     environment = {
       etc."ampinstmgr.conf".source = "${cfg.package}/share/ampinstmgr/ampinstmgr.conf";
       ldso = lib.mkOverride 900 "${pkgs.nix-ld}/libexec/nix-ld";
+      systemPackages = [cfg.package];
     };
 
     users = {
@@ -93,58 +98,90 @@ in {
     };
 
     systemd = {
+      packages = [cfg.package];
+
       services =
         {
           ampinstmgr = {
-            description = "AMP Instance Manager";
-            after = ["network-online.target"];
-            wants = ["network-online.target"];
+            overrideStrategy = "asDropin";
             wantedBy = ["multi-user.target"];
             restartIfChanged = false;
             stopIfChanged = false;
+            path = servicePath;
             environment = serviceEnvironment;
             serviceConfig = {
-              Type = "oneshot";
-              RemainAfterExit = true;
-              User = "amp";
-              Group = "amp";
-              WorkingDirectory = cfg.home;
-              ExecStart = "${ampinstmgr} startboot true";
-              ExecStop = "${ampinstmgr} stopall";
+              WorkingDirectory = ampRoot;
+              ExecStart = [
+                ""
+                "${ampinstmgr} startboot true"
+              ];
+              ExecStop = [
+                ""
+                "${ampinstmgr} stopall"
+              ];
               TimeoutStartSec = cfg.startTimeout;
               TimeoutStopSec = cfg.stopTimeout;
             };
           };
 
           amptasks = {
-            description = "AMP Instance Manager Pending Tasks";
-            after = ["network-online.target"];
-            wants = ["network-online.target"];
+            overrideStrategy = "asDropin";
+            path = servicePath;
             environment = serviceEnvironment;
             serviceConfig = {
-              Type = "oneshot";
               KillMode = "process";
-              User = "amp";
-              Group = "amp";
-              WorkingDirectory = cfg.home;
-              ExecStart = "${ampinstmgr} ProcessPendingTasks";
-              TimeoutStartSec = 60;
+              WorkingDirectory = ampRoot;
+              ExecStart = [
+                ""
+                "${ampinstmgr} ProcessPendingTasks"
+              ];
             };
           };
         }
         // lib.optionalAttrs cfg.firewallSync.enable {
           ampfirewall = {
-            description = "AMP Instance Manager Firewall";
-            after = ["network-online.target"];
+            overrideStrategy = "asDropin";
+            after = ["ampinstmgr.service" "firewall.service" "network-online.target"];
             wants = ["network-online.target"];
+            path = servicePath ++ lib.optional cfg.firewallSync.podman pkgs.podman;
             environment = serviceEnvironment;
             serviceConfig = {
-              Type = "oneshot";
-              User = "root";
-              Group = "root";
-              WorkingDirectory = cfg.home;
-              ExecStart = "${ampinstmgr} --silent updatefirewall amp";
-              TimeoutStartSec = 60;
+              WorkingDirectory = ampRoot;
+              ExecStart = [
+                ""
+                "${ampinstmgr} --silent updatefirewall amp"
+              ];
+            };
+          };
+        }
+        // lib.optionalAttrs (cfg.firewallSync.enable && cfg.firewallSync.podman) {
+          ampfirewall-watch = {
+            description = "AMP Podman Firewall Watcher";
+            after = ["ampinstmgr.service"];
+            wantedBy = ["multi-user.target"];
+            path = [pkgs.coreutils pkgs.jq pkgs.systemd];
+            script = ''
+              journalctl \
+                --follow \
+                --no-tail \
+                --output=json \
+                "_UID=$(id -u amp)" \
+                SYSLOG_IDENTIFIER=podman \
+                PODMAN_TYPE=container |
+              jq --unbuffered -r \
+                '[.PODMAN_EVENT // "", .PODMAN_NAME // ""] | @tsv' |
+              while IFS=$'\t' read -r status name; do
+                case "$status:$name" in
+                  create:AMP_* | start:AMP_* | restart:AMP_* | stop:AMP_* | remove:AMP_* | update:AMP_*)
+                    sleep 2
+                    systemctl start --no-block ampfirewall.service
+                    ;;
+                esac
+              done
+            '';
+            serviceConfig = {
+              Restart = "always";
+              RestartSec = 5;
             };
           };
         };
@@ -152,26 +189,37 @@ in {
       timers =
         {
           amptasks = {
-            description = "AMP Instance Manager Pending Tasks";
-            wantedBy = ["timers.target"];
-            timerConfig = {
-              OnActiveSec = "1s";
-              OnBootSec = "1m";
-              OnUnitActiveSec = "1m";
-            };
+            overrideStrategy = "asDropin";
+            wantedBy = ["multi-user.target"];
           };
         }
         // lib.optionalAttrs cfg.firewallSync.enable {
           ampfirewall = {
-            description = "AMP Instance Manager Firewall";
-            wantedBy = ["timers.target"];
+            overrideStrategy = "asDropin";
+            wantedBy = ["multi-user.target"];
             timerConfig = {
-              OnActiveSec = "1s";
-              OnBootSec = "1m";
-              OnUnitActiveSec = cfg.firewallSync.interval;
+              AccuracySec = "1s";
+              OnBootSec = [
+                "1m30s"
+                "2m"
+                "2m30s"
+                "3m"
+                "3m30s"
+                "4m"
+                "4m30s"
+                "5m"
+              ];
+              OnUnitActiveSec = [
+                ""
+                cfg.firewallSync.interval
+              ];
             };
           };
         };
     };
+
+    networking.firewall.extraCommands = lib.optionalString cfg.firewallSync.enable ''
+      systemctl start --no-block ampfirewall.service
+    '';
   };
 }

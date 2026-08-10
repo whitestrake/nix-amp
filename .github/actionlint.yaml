@@ -1,0 +1,7 @@
+config-variables: null
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # Pending rhysd/actionlint#652 for stale actions/create-github-app-token@v3 metadata.
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"'
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3"'

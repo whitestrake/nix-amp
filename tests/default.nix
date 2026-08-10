@@ -12,4 +12,6 @@ in {
   package-vm = packageTests.vm;
   module-contract = moduleTests.contract;
   module-vm = moduleTests.vm;
+  container-runtimes = import ./containers.nix {inherit pkgs;};
+  updater-fixture = import ./updater.nix {inherit pkgs ampinstmgr;};
 }
