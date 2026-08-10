@@ -36,14 +36,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          parser=$(
-            nix build .#ampinstmgr.versionParser \
+          lister=$(
+            nix build .#packages.x86_64-linux.ampinstmgr.versionLister \
               --no-link \
               --print-out-paths
           )
-          index=$(mktemp)
-          curl -fsSL https://repo.cubecoders.com/ > "$index"
-          version=$("$parser" < "$index" | tail -n 1)
+          version=$("$lister" | tail -n 1)
           [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]
 
           asset="ampinstmgr-$version.x86_64.tgz"
@@ -98,7 +96,6 @@ jobs:
             echo "formatting changed more than version and hash" >&2
             exit 1
           fi
-          nix fmt -- --ci
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Verify and mirror the TGZ

@@ -10,7 +10,6 @@
         glibc.bin
         gzip
         patchelf
-        shadow
       ];
     }
     ''
@@ -102,7 +101,7 @@
       mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 
       ${ampinstmgr}/bin/ampinstmgr -version | tee "$TMPDIR/version"
-      grep -F '2.8.0.4' "$TMPDIR/version"
+      grep -F '${ampinstmgr.version}' "$TMPDIR/version"
       ${ampinstmgr}/bin/ampinstmgr --help >"$TMPDIR/help"
       test -s "$TMPDIR/help"
 
