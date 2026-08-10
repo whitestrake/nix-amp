@@ -45,15 +45,17 @@ jobs:
           [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]
 
           asset="ampinstmgr-$version.x86_64.tgz"
-          mkdir upstream verification
+          mkdir "$RUNNER_TEMP/upstream" "$RUNNER_TEMP/verification"
 
           curl -fsSL \
             "https://repo.cubecoders.com/$asset" \
-            -o "upstream/$asset"
+            -o "$RUNNER_TEMP/upstream/$asset"
           curl -fsSL \
             "https://repo.cubecoders.com/$asset" \
-            -o "verification/$asset"
-          cmp "upstream/$asset" "verification/$asset"
+            -o "$RUNNER_TEMP/verification/$asset"
+          cmp \
+            "$RUNNER_TEMP/upstream/$asset" \
+            "$RUNNER_TEMP/verification/$asset"
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
@@ -114,26 +116,34 @@ jobs:
             sed -n 's/^[[:space:]]*hash = "\(sha256-[^"]*\)";$/\1/p' package.nix
           )
           test -n "$expected"
-          test "$(nix hash file "upstream/$ASSET")" = "$expected"
+          test "$(nix hash file "$RUNNER_TEMP/upstream/$ASSET")" = "$expected"
 
           tag="upstream-ampinstmgr-$VERSION"
-          mkdir existing
+          mkdir "$RUNNER_TEMP/existing"
           publish=false
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release download "$tag" --pattern "$ASSET" --dir existing
-            cmp "upstream/$ASSET" "existing/$ASSET"
+            gh release download "$tag" \
+              --pattern "$ASSET" \
+              --dir "$RUNNER_TEMP/existing"
+            cmp \
+              "$RUNNER_TEMP/upstream/$ASSET" \
+              "$RUNNER_TEMP/existing/$ASSET"
             if test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true; then
               publish=true
             fi
           else
-            gh release create "$tag" "upstream/$ASSET#$ASSET" \
+            gh release create "$tag" "$RUNNER_TEMP/upstream/$ASSET#$ASSET" \
               --draft \
               --target "$(git rev-parse HEAD)" \
               --title "AMP Instance Manager $VERSION" \
               --notes "Unmodified CubeCoders AMP Instance Manager x86_64 TGZ."
-            gh release download "$tag" --pattern "$ASSET" --dir existing
-            cmp "upstream/$ASSET" "existing/$ASSET"
+            gh release download "$tag" \
+              --pattern "$ASSET" \
+              --dir "$RUNNER_TEMP/existing"
+            cmp \
+              "$RUNNER_TEMP/upstream/$ASSET" \
+              "$RUNNER_TEMP/existing/$ASSET"
             publish=true
           fi
 
