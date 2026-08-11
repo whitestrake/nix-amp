@@ -17,6 +17,7 @@
 
       test "$(id -u)" -ne 0
 
+      # Upstream archive shape and integration files
       archive="$TMPDIR/archive"
       mkdir "$archive"
       tar -xzf ${ampinstmgr.src} -C "$archive"
@@ -52,6 +53,7 @@
       8f6f8014b742ec42fb42ac322da3649f45a5357e559dc35d9a825916021e5159  etc/systemd/system/amptasks.timer
       HASHES
 
+      # Installed package layout and wrapper closure
       test -x ${ampinstmgr}/bin/ampinstmgr
       test -x ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
       test -x ${ampinstmgr}/opt/cubecoders/amp/ioredir.so
@@ -60,6 +62,8 @@
       grep -F "cd '${ampinstmgr}/opt/cubecoders/amp'" \
         ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
       grep -F '${pkgs.stdenv.cc.bintools.dynamicLinker}' \
+        ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
+      grep -F '${pkgs.iputils}/bin' \
         ${ampinstmgr}/opt/cubecoders/amp/ampinstmgr
       grep -F '${pkgs.lib.makeLibraryPath [
         pkgs.icu
@@ -77,6 +81,7 @@
           "${ampinstmgr}/lib/systemd/system/$unit"
       done
 
+      # Native executable patching and runtime libraries
       file ${ampinstmgr}/opt/cubecoders/amp/.ampinstmgr-wrapped | grep -F 'ELF 64-bit LSB'
 
       interpreter="$(patchelf --print-interpreter ${ampinstmgr}/opt/cubecoders/amp/.ampinstmgr-wrapped)"
@@ -95,6 +100,7 @@
         *) echo "OpenSSL runtime path missing: $rpath" >&2; exit 1 ;;
       esac
 
+      # Real-binary smoke test in an isolated mutable home
       export HOME="$TMPDIR/home"
       export XDG_CONFIG_HOME="$HOME/.config"
       export XDG_DATA_HOME="$HOME/.local/share"
@@ -135,6 +141,8 @@
       machine.wait_for_unit("multi-user.target")
       machine.succeed("test $(stat -c %U /var/lib/amp-spike) = amp-spike")
 
+      # Trace the real binary as an unprivileged user to prove that basic
+      # commands neither invoke host managers nor write outside mutable paths.
       command = (
           "runuser -u amp-spike -- env -i "
           "HOME=/var/lib/amp-spike "

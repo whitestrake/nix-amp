@@ -12,10 +12,10 @@ required to run AMP. The upstream binary remains governed by the
 
 - Project status: experimental.
 - Supported target: x86_64 NixOS 26.05.
-- The manager, ADS, and Satisfactory servers have been successfully tested on
-  NixOS with rootless Podman.
+- The AMP manager, its ADS management instance, and Satisfactory servers have
+  been successfully tested on NixOS with rootless Podman.
 
-## Use
+## NixOS module
 
 Add the flake input and import the module:
 
@@ -88,9 +88,9 @@ export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
 ampinstmgr status
 ```
 
-## First-time setup and licence
+## ADS setup and licence
 
-After enabling the module, create the initial ADS management instance:
+By default, create the initial ADS management instance interactively:
 
 ```console
 sudo -iu amp
@@ -109,9 +109,81 @@ ssh -N -L 18080:127.0.0.1:8080 user@gameserver
 
 Then open `http://127.0.0.1:18080/`.
 
-The module intentionally has no licence-key option. Putting the key in Nix
-configuration would copy it into the Nix store. Activate or reactivate AMP
-through its interface or from an interactive `amp` user session instead.
+For unattended setup, supply runtime credential files:
+
+```nix
+services.amp = {
+  enable = true;
+
+  ads.bootstrap = {
+    adminUsername = "admin";
+    adminPasswordFile = "/run/keys/amp-admin-password";
+    licenceKeyFile = "/run/keys/amp-licence"; # Optional.
+  };
+};
+```
+
+The files must already exist and be readable by root. Use a secret manager or
+another runtime-only location; do not create them with `builtins.toFile` or
+otherwise place their contents in the Nix store. Systemd reads them as root and
+passes them to the `amp` bootstrap service as credentials. Keep them available
+while `ads.bootstrap` remains configured; after bootstrap completes, you may
+remove that option and retire the files.
+
+Bootstrap creates only a new `ADS01`. It refuses to adopt or overwrite an
+existing instance without its `.ampdata/.nix-amp/bootstrap-state` completion
+marker. A failed partial bootstrap must be recovered or removed explicitly
+before retrying.
+
+CubeCoders' command-line interface accepts the initial password and licence
+only as arguments. The module therefore cannot keep them out of the transient
+process argument list: the password appears base64-encoded and the licence key
+appears verbatim while the relevant command runs. They are not placed in the
+Nix store, service environment, unit definition, or journal by the module.
+
+You can still omit `ads.bootstrap` and activate or reactivate AMP through its
+interface or an interactive `amp` user session. If you also declare managed
+settings, apply them after interactive setup:
+
+```console
+sudo systemctl restart ampads-reconcile.service
+```
+
+## Declarative ADS settings
+
+Settings declared under `services.amp.ads.settings` are reconciled when their
+NixOS configuration changes:
+
+```nix
+services.amp.ads.settings = {
+  createInContainers = true;
+  useHostNetworkingForNewContainers = false;
+  defaultAuthServerUrl = "http://host.containers.internal:8080/";
+  defaultInstanceBindAddress = "127.0.0.1";
+  defaultApplicationBindAddress = "0.0.0.0";
+};
+```
+
+The module changes only declared settings. If drift is found, it stops ADS
+when necessary, calls AMP's native `reconfigureinstance`, verifies the written
+configuration, and starts ADS again. An unchanged switch leaves ADS running.
+A failed reconfiguration leaves the unit failed and attempts to restore an ADS
+instance that was running before reconciliation.
+
+Advanced users can pass additional non-secret AMP provisioning settings:
+
+```nix
+services.amp.ads.settings.extraSettings = {
+  "ADSModule.Defaults.ContainerManager" = "Automatic";
+};
+```
+
+Use complete AMP provisioning keys. Invalid keys and values, duplicates of the
+built-in options, and bootstrap-owned settings are rejected during evaluation.
+Unknown-but-well-formed keys are passed to AMP and may fail during
+reconciliation.
+
+## Module options
 
 The module intentionally has a small option surface:
 
@@ -120,8 +192,10 @@ The module intentionally has a small option surface:
 | `services.amp.enable` | `false` | Enable the AMP manager and pending-task timer. |
 | `services.amp.package` | flake build | Select the immutable manager package. |
 | `services.amp.home` | `/home/amp` | Locate AMP's mutable home and `.ampdata`. |
-| `services.amp.startTimeout` | `180` | Allow manager startup this many seconds. |
-| `services.amp.stopTimeout` | `180` | Allow graceful `stopall` this many seconds. |
+| `services.amp.startTimeout` | `180` | Allow AMP and ADS startup this many seconds. |
+| `services.amp.stopTimeout` | `180` | Allow graceful AMP instance shutdown this many seconds. |
+| `services.amp.ads.bootstrap` | `null` | Optionally create and activate ADS01 unattended. |
+| `services.amp.ads.settings` | `{}` | Declaratively reconcile selected ADS settings. |
 | `services.amp.firewallSync.enable` | AMP enabled | Let AMP reconcile its declared firewall ports. |
 | `services.amp.firewallSync.interval` | `5m` | Set the steady-state reconciliation interval. |
 | `services.amp.firewallSync.podman` | Sync and Podman enabled | Reconcile after AMP Podman container events. |
@@ -131,7 +205,7 @@ The module intentionally has a small option surface:
 AMP and ADS run directly on NixOS. AMP creates and owns the game containers;
 do not declare those containers through `virtualisation.oci-containers`.
 CubeCoders likewise documents that the manager and ADS must remain outside
-containers while game instances may be containerized.
+containers while game instances may be containerised.
 
 The module deliberately does not enable a container engine or choose host
 storage and networking policy. A minimal rootless Podman host configuration
@@ -164,29 +238,29 @@ Rootless Podman is the supported container backend. Docker can be configured
 separately, but access to its rootful socket grants the `amp` account
 root-equivalent host control. Rootless Docker is unverified.
 
-## Firewall behavior
+## Firewall behaviour
 
 By default, AMP manages the firewall ports declared by its instances, so
 adding or changing a game server does not require rebuilding NixOS. This gives
 AMP permission to open and close host firewall ports. When Podman is enabled,
 container changes are handled automatically without additional AMP options.
 
-Firewall synchronization is the module's privileged AMP component. AMP
+Firewall synchronisation is the module's privileged AMP component. AMP
 requires UID 0 for this operation. Systemd restricts it to DAC read/search,
 network-administration, and raw-network capabilities and makes the system
 filesystem read-only. This reduces its authority but is not a complete
-sandbox; enabling synchronization explicitly trusts this AMP component.
+sandbox; enabling synchronisation explicitly trusts this AMP component.
 
 The module keeps unmatched input denied while allowing IPv4 host firewall
 rules added after NixOS's generated rules to take effect. This applies to all
 later IPv4 `INPUT` rules, not only rules created by AMP.
 
-AMP-managed synchronization is currently IPv4-only. Declare any required IPv6
+AMP-managed synchronisation is currently IPv4-only. Declare any required IPv6
 ports through NixOS.
 
 To manage every port declaratively through NixOS, or when using
-`networking.firewall.backend = "nftables"`, disable AMP synchronization and
-declare the required ports yourself. Disabling synchronization removes the
+`networking.firewall.backend = "nftables"`, disable AMP synchronisation and
+declare the required ports yourself. Disabling synchronisation removes the
 runtime IPv4 `INPUT` accepts that AMP marked as its own.
 
 ```nix
@@ -200,41 +274,57 @@ runtime IPv4 `INPUT` accepts that AMP marked as its own.
 }
 ```
 
-To retain normal synchronization without reacting immediately to Podman
+To retain normal synchronisation without reacting immediately to Podman
 container changes, set
 `services.amp.firewallSync.podman = false`.
 
 ## State, updates, and maintenance
 
-The Nix store owns the immutable `ampinstmgr` package. AMP owns mutable ADS,
-instance, download, configuration, licence, and game data under
-`${services.amp.home}/.ampdata`. The default is:
+### State and backups
+
+The Nix store owns the immutable `ampinstmgr` package. Treat the complete
+`${services.amp.home}` as AMP's mutable persistence and backup boundary. AMP
+keeps its controller state under `.ampdata`, but game templates may write
+elsewhere in the home, including `.config`. The default home is:
 
 ```text
-/home/amp/.ampdata
+/home/amp
 ```
 
 If you override `services.amp.home`, keep it persistent, writable by `amp`, and
-outside `/nix/store` and `/home/amp`. Back up the state directory separately
-from the NixOS configuration. Stop AMP instances before taking an
-application-consistent backup or restore.
+outside `/nix/store` and `/home/amp`. Back up the complete home separately from
+the NixOS configuration. Stop AMP instances before taking an
+application-consistent backup or restoring one.
 
-Choose a custom home before the first activation when possible. Before moving
-or restoring state, quiesce every AMP worker:
+### Moving the AMP home
+
+Choose a custom home before the first activation when possible. When moving an
+existing installation, quiesce every AMP worker and terminate the lingering
+`amp` user manager before moving its home:
 
 ```console
 sudo systemctl stop 'amptasks.*' 'ampfirewall*' ampinstmgr.service
+sudo loginctl terminate-user amp
 systemctl --state=active 'amp*'
 ```
 
-The second command should return no units. Move the state and replace
-`/home/amp` with a symlink to the configured home before rebuilding. The
-firewall synchronizer will not run when `/home/amp` resolves somewhere else,
-preventing it from silently reading stale state.
+The final command should return no units. Move the complete home, then ensure
+`/home/amp` no longer exists before rebuilding. The module creates a
+compatibility symlink from `/home/amp` to the configured home. The firewall
+synchroniser will not run while that link is absent or resolves somewhere
+else, preventing it from silently reading stale state.
 
 Before changing a custom home back to `/home/amp`, stop AMP, remove the symlink,
 and restore the state as a real `/home/amp` directory. The module will refuse to
 start AMP while the old custom-home symlink remains.
+
+After copying or restoring AMP state, ensure the complete home is owned by the
+current host's `amp:amp` account. Numeric UID and GID values retained from
+another host may not match. After a host migration or material identity change,
+verify the ADS licence state and reactivate it if required before declaring the
+migration complete.
+
+### Updating
 
 The manager package is pinned by version and hash. Update the flake input and
 rebuild NixOS:
@@ -257,6 +347,8 @@ and restarted individually or together during a maintenance window.
 Confirm ADS, every expected instance, game connectivity, saves, firewall
 rules, and backups afterward.
 
+### Rollback
+
 Rollback has two parts:
 
 - Select the previous flake revision or NixOS generation.
@@ -272,6 +364,9 @@ state migration.
 - Native AMP on NixOS is not an upstream-supported installation method.
 - The module provides the generic AMP service boundary, not storage,
   reverse-proxy, TLS, DNS, monitoring, backup, deployment, or secret policy.
+- An active `ampinstmgr.service` records successful lifecycle orchestration; it
+  does not continuously verify ADS health. Monitor the configured ADS endpoint
+  separately where ongoing availability matters.
 - AMP downloads additional mutable executables after installation. The module
   provides a narrowly scoped compatibility environment, but a future payload
   may still introduce an unhandled FHS or library dependency.

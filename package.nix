@@ -14,6 +14,7 @@
   gnused,
   gnutar,
   icu,
+  iputils,
   numactl,
   nix,
   openssl,
@@ -24,6 +25,7 @@
   xz,
   zlib,
 }: let
+  # Accept only exact versioned x86_64 archives from CubeCoders' listing.
   versionParser = writeShellScript "ampinstmgr-version-parser" ''
     set -euo pipefail
 
@@ -44,6 +46,8 @@
     ${lib.getExe curl} -fsSL https://repo.cubecoders.com/ | ${versionParser}
   '';
 
+  # Update only the canonical version and fixed hash. Exact match counts make a
+  # formatting or package-layout change fail closed for human review.
   updateScript = writeShellScript "ampinstmgr-update" ''
     set -euo pipefail
 
@@ -86,7 +90,10 @@ in
     version = "2.8.0.4";
 
     src = fetchurl {
-      url = "https://repo.cubecoders.com/ampinstmgr-${finalAttrs.version}.x86_64.tgz";
+      urls = [
+        "https://github.com/whitestrake/nix-amp/releases/download/upstream-ampinstmgr-${finalAttrs.version}/ampinstmgr-${finalAttrs.version}.x86_64.tgz"
+        "https://repo.cubecoders.com/ampinstmgr-${finalAttrs.version}.x86_64.tgz"
+      ];
       hash = "sha256-JFqSOyig3q/o5Y+0K7WsS0MEWnVD3SP1auA92qNYwpo=";
     };
 
@@ -121,9 +128,11 @@ in
         "$out/share/ampinstmgr"
 
       cp -a opt/cubecoders/amp "$out/opt/cubecoders/"
+      # getamp is the mutable host installer; the Nix package owns installation.
       rm "$out/opt/cubecoders/amp/getamp"
 
       cp etc/ampinstmgr.conf "$out/share/ampinstmgr/"
+      # module.nix imports these upstream units, then applies NixOS drop-ins.
       cp etc/systemd/system/* "$out/lib/systemd/system/"
 
       ln -s ../opt/cubecoders/amp/ampinstmgr "$out/bin/ampinstmgr"
@@ -131,6 +140,8 @@ in
       runHook postInstall
     '';
 
+    # The wrapper supports both the manager and mutable payloads AMP downloads
+    # after the Nix build has completed.
     postFixup = ''
       wrapProgram "$out/opt/cubecoders/amp/ampinstmgr" \
         --chdir "$out/opt/cubecoders/amp" \
@@ -146,6 +157,8 @@ in
         coreutils
         git
         gnutar
+        # AMP uses ping for network reachability checks.
+        iputils
         numactl
         socat
         tmux

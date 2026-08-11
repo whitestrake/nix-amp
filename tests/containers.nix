@@ -1,4 +1,6 @@
 {pkgs}: let
+  # A minimal persistent workload with one TCP and one UDP listener exercises
+  # the rootless runtime without depending on AMP's proprietary payload.
   image = pkgs.dockerTools.buildImage {
     name = "amp-runtime-test";
     tag = "latest";
@@ -34,6 +36,8 @@ in
     name = "amp-container-runtimes";
 
     nodes = {
+      # Test rootless Podman alone, then beside rootful Docker to catch socket
+      # aliasing or daemon-level integration conflicts.
       podman = {
         virtualisation.podman.enable = true;
         users.groups.amp = {};
@@ -68,19 +72,19 @@ in
           node.succeed("test $(loginctl show-user amp -P Linger) = yes")
           node.succeed("test -S /run/user/$(id -u amp)/podman/podman.sock")
 
+      # Keep every interactive Podman call in the amp user's runtime context.
+      amp_podman = (
+          "runuser -u amp -- env HOME=/home/amp "
+          "XDG_RUNTIME_DIR=/run/user/$(id -u amp) podman"
+      )
+
       with subtest("rootless Podman publishes TCP and UDP and preserves state"):
           podman.succeed(
               "install -d -o amp -g amp /home/amp/runtime-test"
           )
+          podman.succeed(f"{amp_podman} load -i ${image}")
           podman.succeed(
-              "runuser -u amp -- env HOME=/home/amp "
-              "XDG_RUNTIME_DIR=/run/user/$(id -u amp) "
-              "podman load -i ${image}"
-          )
-          podman.succeed(
-              "runuser -u amp -- env HOME=/home/amp "
-              "XDG_RUNTIME_DIR=/run/user/$(id -u amp) "
-              "podman run -d --name AMP_RuntimeTest "
+              f"{amp_podman} run -d --name AMP_RuntimeTest "
               "-p 127.0.0.1:18081:8081/tcp "
               "-p 127.0.0.1:17777:7777/udp "
               "-v /home/amp/runtime-test:/state "
@@ -94,11 +98,7 @@ in
               "printf probe | socat - UDP:127.0.0.1:17777,so-broadcast "
               "| grep -Fx udp"
           )
-          podman.succeed(
-              "runuser -u amp -- env HOME=/home/amp "
-              "XDG_RUNTIME_DIR=/run/user/$(id -u amp) "
-              "podman restart AMP_RuntimeTest"
-          )
+          podman.succeed(f"{amp_podman} restart AMP_RuntimeTest")
           podman.wait_until_succeeds(
               "curl -fsS http://127.0.0.1:18081/marker "
               "| grep -Fx persistent"
@@ -107,11 +107,7 @@ in
           podman.reboot()
           podman.wait_for_unit("multi-user.target")
           podman.wait_for_unit("user@$(id -u amp).service")
-          podman.succeed(
-              "runuser -u amp -- env HOME=/home/amp "
-              "XDG_RUNTIME_DIR=/run/user/$(id -u amp) "
-              "podman start AMP_RuntimeTest"
-          )
+          podman.succeed(f"{amp_podman} start AMP_RuntimeTest")
           podman.wait_until_succeeds(
               "curl -fsS http://127.0.0.1:18081/marker "
               "| grep -Fx persistent"
@@ -134,15 +130,9 @@ in
               "curl -fsS http://127.0.0.1:28081/marker "
               "| grep -Fx persistent"
           )
+          coexist.succeed(f"{amp_podman} load -i ${image}")
           coexist.succeed(
-              "runuser -u amp -- env HOME=/home/amp "
-              "XDG_RUNTIME_DIR=/run/user/$(id -u amp) "
-              "podman load -i ${image}"
-          )
-          coexist.succeed(
-              "runuser -u amp -- env HOME=/home/amp "
-              "XDG_RUNTIME_DIR=/run/user/$(id -u amp) "
-              "podman run -d --name AMP_RuntimeTest "
+              f"{amp_podman} run -d --name AMP_RuntimeTest "
               "-p 127.0.0.1:38081:8081/tcp "
               "localhost/amp-runtime-test:latest"
           )

@@ -4,6 +4,7 @@
   pkgs,
   ...
 }: let
+  # Shared paths and service environment
   cfg = config.services.amp;
   ampRoot = "${cfg.package}/opt/cubecoders/amp";
   ampinstmgr = lib.getExe' cfg.package "ampinstmgr";
@@ -28,7 +29,10 @@
     NIX_LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibraries;
     TERM = "xterm-256color";
   };
-  ampServiceCommand =
+
+  # AMP speaks Docker's API. When Podman is enabled, point system services at
+  # the dedicated amp user's rootless socket rather than the rootful socket.
+  ampinstmgrServiceExe =
     if podmanEnabled
     then
       pkgs.writeShellScript "ampinstmgr-podman" ''
@@ -39,10 +43,13 @@
       ''
     else ampinstmgr;
   ampServicePath = servicePath ++ lib.optional podmanEnabled pkgs.podman;
-  podmanService = lib.optionalAttrs podmanEnabled {
+  podmanUnitOrdering = lib.optionalAttrs podmanEnabled {
     after = ["linger-users.service"];
     wants = ["linger-users.service"];
   };
+
+  # Custom homes retain /home/amp as a compatibility path for upstream
+  # root-level commands. Refuse to run if that path does not match cfg.home.
   ampHomeCondition = pkgs.writeShellScript "amp-home-compatible" ''
     ${
       if cfg.home == "/home/amp"
@@ -60,11 +67,440 @@
       ''
     }
   '';
+
+  # Declarative ADS settings
+  adsSettingsType = lib.types.submodule {
+    options = {
+      createInContainers = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether new AMP instances are created in containers.";
+      };
+
+      useHostNetworkingForNewContainers = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether new containers use host networking.";
+      };
+
+      defaultAuthServerUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Default AMP authentication server URL for new instances.";
+      };
+
+      defaultInstanceBindAddress = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Default web-interface bind address for new instances.";
+      };
+
+      defaultApplicationBindAddress = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Default application bind address for new instances.";
+      };
+
+      extraSettings = lib.mkOption {
+        type = lib.types.attrsOf (
+          lib.types.oneOf [
+            lib.types.bool
+            lib.types.int
+            lib.types.str
+          ]
+        );
+        default = {};
+        description = "Additional non-secret ADS provisioning settings.";
+      };
+    };
+  };
+  formatAdsValue = value:
+    if builtins.isBool value
+    then
+      if value
+      then "True"
+      else "False"
+    else toString value;
+  typedAdsSettings = lib.filter (setting: setting.value != null) [
+    {
+      provisioningKey = "ADSModule.Defaults.UseDocker";
+      value = cfg.ads.settings.createInContainers;
+    }
+    {
+      provisioningKey = "ADSModule.Network.UseDockerHostNetwork";
+      value = cfg.ads.settings.useHostNetworkingForNewContainers;
+    }
+    {
+      provisioningKey = "ADSModule.Defaults.DefaultAuthServerURL";
+      value = cfg.ads.settings.defaultAuthServerUrl;
+    }
+    {
+      provisioningKey = "ADSModule.Network.DefaultIPBinding";
+      value = cfg.ads.settings.defaultInstanceBindAddress;
+    }
+    {
+      provisioningKey = "ADSModule.Network.DefaultAppIPBinding";
+      value = cfg.ads.settings.defaultApplicationBindAddress;
+    }
+  ];
+  extraAdsSettings =
+    lib.mapAttrsToList (provisioningKey: value: {
+      inherit provisioningKey value;
+    })
+    cfg.ads.settings.extraSettings;
+  typedAdsSettingKeys = map (setting: setting.provisioningKey) typedAdsSettings;
+  extraAdsSettingKeys = builtins.attrNames cfg.ads.settings.extraSettings;
+  reservedAdsSettingKeys = [
+    "ADSModule.ADS.Mode"
+    "Core.Webserver.IPBinding"
+    "Core.Webserver.Port"
+  ];
+  validAdsSettingKey = key:
+    builtins.match "^[^.\t\r\n]+(\\.[^.\t\r\n]+)+$" key
+    != null
+    && builtins.match ".*[[:cntrl:]].*" key == null;
+  validAdsSettingValue = value:
+    !builtins.isString value
+    || builtins.match ".*[[:cntrl:]].*" value == null;
+
+  # Core.* settings live in AMPConfig.conf; all other areas use <area>.kvp.
+  toManagedAdsFileSetting = setting: let
+    parts = lib.splitString "." setting.provisioningKey;
+    area = builtins.head parts;
+    target =
+      if lib.hasPrefix "Core." setting.provisioningKey
+      then {
+        targetFile = "AMPConfig.conf";
+        targetKey = lib.removePrefix "Core." setting.provisioningKey;
+      }
+      else {
+        targetFile = "${area}.kvp";
+        targetKey = lib.concatStringsSep "." (builtins.tail parts);
+      };
+  in
+    setting
+    // target
+    // {value = formatAdsValue setting.value;};
+  managedAdsSettings =
+    lib.sort
+    (left: right: left.provisioningKey < right.provisioningKey)
+    (map toManagedAdsFileSetting (typedAdsSettings ++ extraAdsSettings));
+  adsSettingsEnabled = managedAdsSettings != [];
+  adsSettingsManifest = pkgs.writeText "amp-ads-settings.tsv" (
+    lib.concatMapStringsSep "\n" (setting:
+      lib.concatStringsSep "\t" [
+        setting.provisioningKey
+        setting.targetFile
+        setting.targetKey
+        setting.value
+      ])
+    managedAdsSettings
+    + lib.optionalString adsSettingsEnabled "\n"
+  );
+  adsBootstrap = cfg.ads.bootstrap;
+
+  # Shared ADS lifecycle helpers
+  #
+  # Bootstrap and reconciliation serialise ADS01 changes through descriptor 9.
+  # AMP is invoked with that descriptor closed so persistent children cannot
+  # retain the lifecycle lock after the oneshot exits.
+  adsLifecycleFunctions = ''
+    lock_ads() {
+      install -d -m 0700 "$HOME/.ampdata/.nix-amp"
+      exec 9>"$HOME/.ampdata/.nix-amp/lifecycle.lock"
+      flock --exclusive \
+        --timeout ${toString (cfg.startTimeout + cfg.stopTimeout)} 9
+    }
+
+    run_amp() {
+      timeout --kill-after=1 ${toString cfg.startTimeout} \
+        ${ampinstmgrServiceExe} "$@" 9>&-
+    }
+
+    read_status() {
+      if ! status_output="$(run_amp status)"; then
+        echo "Could not read AMP instance status" >&2
+        exit 1
+      fi
+    }
+
+    ads_registered() {
+      awk '$1 == "ADS01" { found = 1 } END { exit !found }' \
+        <<< "$status_output"
+    }
+
+    ads_running() {
+      awk '$1 == "ADS01" && $NF == "✓" { found = 1 } END { exit !found }' \
+        <<< "$status_output"
+    }
+
+    wait_for_ads() {
+      message="$1"
+      deadline=$((SECONDS + ${toString cfg.startTimeout}))
+      while true; do
+        read_status
+        ads_running && return
+        if test "$SECONDS" -ge "$deadline"; then
+          echo "$message" >&2
+          exit 1
+        fi
+        sleep 1
+      done
+    }
+  '';
+
+  # Bootstrap creates only a new ADS01. "in-progress" permits an explicit
+  # recovery attempt; "complete" is written only after ADS is registered and
+  # running.
+  adsBootstrapCommand = pkgs.writeShellApplication {
+    name = "ampads-bootstrap";
+    runtimeInputs = [pkgs.coreutils pkgs.gawk pkgs.util-linux];
+    text = ''
+      state_dir="$HOME/.ampdata/.nix-amp"
+      state="$state_dir/bootstrap-state"
+      instance="$HOME/.ampdata/instances/ADS01"
+
+      ${adsLifecycleFunctions}
+
+      lock_ads
+
+      # Keep the marker transition atomic so interrupted runs remain recoverable.
+      write_state() {
+        printf '%s\n' "$1" > "$state.new"
+        mv "$state.new" "$state"
+      }
+
+      if test -e "$state"; then
+        IFS= read -r current_state < "$state" || true
+        case "$current_state" in
+          complete)
+            read_status
+            if ! ads_registered; then
+              echo "ADS01 bootstrap is marked complete but ADS01 is not registered" >&2
+              exit 1
+            fi
+            exit 0
+            ;;
+          in-progress) ;;
+          *)
+            echo "Unknown ADS bootstrap state: $current_state" >&2
+            exit 1
+            ;;
+        esac
+      else
+        current_state=
+      fi
+
+      # systemd credentials keep secrets out of the Nix store and unit
+      # environment. AMP's CLI still requires them as transient arguments.
+      password_file="$CREDENTIALS_DIRECTORY/admin-password"
+      test -s "$password_file"
+      password="$(<"$password_file")"
+      test -n "$password"
+      password_argument="base64:$(printf %s "$password" | base64 -w0)"
+      unset password
+
+      ${
+        if adsBootstrap.licenceKeyFile == null
+        then "licence="
+        else ''
+          licence_file="$CREDENTIALS_DIRECTORY/licence-key"
+          test -s "$licence_file"
+          licence="$(<"$licence_file")"
+          test -n "$licence"
+        ''
+      }
+
+      # A missing marker means nix-amp must not adopt pre-existing AMP state.
+      read_status
+      if test -z "$current_state"; then
+        if ads_registered; then
+          echo "ADS01 already exists without nix-amp bootstrap state; refusing to adopt it" >&2
+          exit 1
+        fi
+        if test -e "$instance"; then
+          echo "An unregistered ADS01 directory already exists; refusing to overwrite it" >&2
+          exit 1
+        fi
+
+        write_state in-progress
+      fi
+
+      if ! ads_registered; then
+        if test -e "$instance"; then
+          echo "ADS01 bootstrap is incomplete; remove or recover the partial instance explicitly" >&2
+          exit 1
+        fi
+
+        arguments=(
+          create
+          ADS
+          ADS01
+          ${lib.escapeShellArg adsBootstrap.bindAddress}
+          ${toString adsBootstrap.port}
+          ""
+          ${lib.escapeShellArg adsBootstrap.adminUsername}
+          "$password_argument"
+          +ADSModule.ADS.Mode
+          ${lib.escapeShellArg adsBootstrap.operationMode}
+          ${lib.concatMapStringsSep "\n          " (setting:
+        lib.escapeShellArgs [
+          "+${setting.provisioningKey}"
+          setting.value
+        ])
+      managedAdsSettings}
+        )
+
+        run_amp "''${arguments[@]}"
+
+        read_status
+        if ! ads_registered; then
+          echo "AMP CreateInstance returned without registering ADS01" >&2
+          exit 1
+        fi
+      fi
+
+      run_amp setstartboot ADS01 true
+
+      if test -n "$licence"; then
+        run_amp reactivate ADS01 "$licence"
+        unset licence
+      fi
+
+      read_status
+      if ! ads_running; then
+        run_amp startinstance ADS01
+      fi
+
+      wait_for_ads "ADS01 did not reach running state after bootstrap"
+
+      # Registration and a running process are the bootstrap commit point.
+      write_state complete
+    '';
+  };
+
+  # Reconciliation compares AMP's written files with the managed manifest,
+  # invokes reconfigureinstance only for drift, verifies the result, and
+  # restores an ADS instance that was running if a later step fails.
+  adsReconcileCommand = pkgs.writeShellApplication {
+    name = "ampads-reconcile";
+    runtimeInputs = [pkgs.coreutils pkgs.gawk pkgs.util-linux];
+    text = ''
+      instance="$HOME/.ampdata/instances/ADS01"
+
+      ${adsLifecycleFunctions}
+
+      lock_ads
+
+      read_status
+      if ! ads_registered; then
+        echo "ADS01 is not registered; skipping managed settings"
+        exit 0
+      fi
+
+      # Return codes distinguish a missing key (10) from duplicate, malformed,
+      # or unreadable configuration (11-13), which cannot be changed safely.
+      read_setting() {
+        file="$1"
+        key="$2"
+        test -r "$file" || return 13
+        awk -v key="$key" '
+          /^[[:space:]]*($|#)/ { next }
+          index($0, "=") == 0 { malformed = 1; next }
+          {
+            candidate = substr($0, 1, index($0, "=") - 1)
+            if (candidate == key) {
+              count++
+              value = substr($0, index($0, "=") + 1)
+            }
+          }
+          END {
+            if (malformed) exit 12
+            if (count == 0) exit 10
+            if (count > 1) exit 11
+            print value
+          }
+        ' "$file"
+      }
+
+      arguments=(reconfigureinstance ADS01)
+      drift=0
+      while IFS=$'\t' read -r provisioning_key target_file target_key desired; do
+        if actual="$(read_setting "$instance/$target_file" "$target_key")"; then
+          if test "$actual" != "$desired"; then
+            arguments+=("+$provisioning_key" "$desired")
+            drift=1
+          fi
+        else
+          result=$?
+          case "$result" in
+            10)
+              arguments+=("+$provisioning_key" "$desired")
+              drift=1
+              ;;
+            *)
+              echo "Cannot safely read $target_key from $target_file" >&2
+              exit 1
+              ;;
+          esac
+        fi
+      done < ${adsSettingsManifest}
+
+      if test "$drift" -eq 0; then
+        exit 0
+      fi
+
+      # Preserve the pre-reconciliation running state across success or failure.
+      was_running=false
+      read_status
+      if ads_running; then
+        was_running=true
+      fi
+
+      restore_on_failure() {
+        result=$?
+        if test "$result" -ne 0 && test "$was_running" = true; then
+          run_amp startinstance ADS01 || true
+        fi
+        exit "$result"
+      }
+      trap restore_on_failure EXIT
+
+      if test "$was_running" = true; then
+        timeout --kill-after=1 ${toString cfg.stopTimeout} \
+          ${ampinstmgrServiceExe} stopinstance ADS01 9>&-
+      fi
+
+      run_amp "''${arguments[@]}"
+
+      # AMP returning successfully is not sufficient; verify every written key.
+      while IFS=$'\t' read -r _ target_file target_key desired; do
+        actual="$(read_setting "$instance/$target_file" "$target_key")"
+        if test "$actual" != "$desired"; then
+          echo "AMP did not apply $target_key in $target_file" >&2
+          exit 1
+        fi
+      done < ${adsSettingsManifest}
+
+      if test "$was_running" = true; then
+        run_amp startinstance ADS01
+        wait_for_ads "ADS01 did not reach running state after reconciliation"
+      fi
+
+      trap - EXIT
+    '';
+  };
+
+  # NixOS rejects unmatched input before AMP's appended INPUT rules. The
+  # bridge returns from nixos-fw-refuse, then relies on an INPUT DROP policy:
+  # NixOS accepts still win, AMP's later accepts become reachable, and all
+  # remaining traffic stays denied.
   firewallBridgeCleanup = pkgs.writeShellApplication {
     name = "ampfirewall-bridge-cleanup";
     text = ''
       state=/run/ampfirewall-bridge/input-policy
 
+      # Remove every copy in case a prior interrupted reload left duplicates.
       while ${iptables} -w -C nixos-fw-refuse \
         -m comment --comment ${bridgeTag} -j RETURN 2>/dev/null; do
         ${iptables} -w -D nixos-fw-refuse \
@@ -83,6 +519,7 @@
   firewallBridgeTeardown = pkgs.writeShellApplication {
     name = "ampfirewall-bridge-teardown";
     text = ''
+      # AMP owns rules carrying its "/* AMP:" comment marker.
       rules=
       while read -r number target rest; do
         case "$number:$target:$rest" in
@@ -107,9 +544,11 @@
       }
       trap cleanup ERR
 
+      # Apply only to a complete NixOS iptables ruleset.
       ${iptables} -w -C INPUT -j nixos-fw
       ${iptables} -w -S nixos-fw-refuse >/dev/null
 
+      # Save the policy once so disable/removal can restore what it inherited.
       if ! test -e "$state"; then
         policy=
         while read -r operation chain candidate _; do
@@ -129,6 +568,7 @@
 
       ${iptables} -w -P INPUT DROP
 
+      # Replace any stale bridge copies with one first-position RETURN.
       while ${iptables} -w -C nixos-fw-refuse \
         -m comment --comment ${bridgeTag} -j RETURN 2>/dev/null; do
         ${iptables} -w -D nixos-fw-refuse \
@@ -153,7 +593,7 @@ in {
     home = lib.mkOption {
       type = lib.types.str;
       default = "/home/amp";
-      description = "Home directory containing AMP's mutable .ampdata state.";
+      description = "Home directory containing all mutable AMP and game state.";
     };
 
     startTimeout = lib.mkOption {
@@ -168,18 +608,85 @@ in {
       description = "Seconds allowed for AMP shutdown.";
     };
 
+    ads = {
+      bootstrap = lib.mkOption {
+        type = lib.types.nullOr (lib.types.submodule {
+          options = {
+            adminUsername = lib.mkOption {
+              type = lib.types.str;
+              default = "admin";
+              description = "Initial ADS administrator username.";
+            };
+
+            adminPasswordFile = lib.mkOption {
+              type = lib.types.strMatching "^/.*";
+              description = ''
+                Absolute path to a root-readable file containing the initial
+                ADS administrator password. A string path keeps the secret out
+                of the Nix store.
+              '';
+            };
+
+            licenceKeyFile = lib.mkOption {
+              type = lib.types.nullOr (lib.types.strMatching "^/.*");
+              default = null;
+              description = ''
+                Optional absolute path to a root-readable file containing the
+                AMP licence key. A string path keeps the secret out of the Nix
+                store.
+              '';
+            };
+
+            bindAddress = lib.mkOption {
+              type = lib.types.str;
+              default = "0.0.0.0";
+              description = "Initial ADS web-interface bind address.";
+            };
+
+            port = lib.mkOption {
+              type = lib.types.port;
+              default = 8080;
+              description = "Initial ADS web-interface port.";
+            };
+
+            operationMode = lib.mkOption {
+              type = lib.types.enum [
+                "Standalone"
+                "Controller"
+                "Target"
+                "Hybrid"
+              ];
+              default = "Standalone";
+              description = "Initial ADS operation mode.";
+            };
+          };
+        });
+        default = null;
+        description = "Optional unattended creation of the ADS01 instance.";
+      };
+
+      settings = lib.mkOption {
+        type = adsSettingsType;
+        default = {};
+        description = ''
+          Declaratively managed ADS settings. Null typed fields are unmanaged.
+          Applying detected drift may restart ADS.
+        '';
+      };
+    };
+
     firewallSync = {
       enable = lib.mkOption {
         type = lib.types.bool;
         default = cfg.enable;
         defaultText = lib.literalExpression "config.services.amp.enable";
-        description = "Whether AMP synchronizes its declared firewall ports.";
+        description = "Whether AMP synchronises its declared firewall ports.";
       };
 
       interval = lib.mkOption {
         type = lib.types.str;
         default = "5m";
-        description = "Systemd interval between AMP firewall synchronizations.";
+        description = "Systemd interval between AMP firewall synchronisations.";
       };
 
       podman = lib.mkOption {
@@ -189,7 +696,7 @@ in {
           config.services.amp.firewallSync.enable
           && config.virtualisation.podman.enable
         '';
-        description = "Whether Podman container events trigger immediate AMP firewall synchronization.";
+        description = "Whether Podman container events trigger immediate AMP firewall synchronisation.";
       };
     };
   };
@@ -207,7 +714,7 @@ in {
           && cfg.home != "/nix/store"
           && !lib.hasPrefix "/nix/store/" cfg.home
           && (cfg.home == "/home/amp" || !lib.hasPrefix "/home/amp/" cfg.home);
-        message = "services.amp.home must be normalized, writable, outside /nix/store, and not below /home/amp.";
+        message = "services.amp.home must be normalised, writable, outside /nix/store, and not below /home/amp.";
       }
       {
         assertion = !cfg.firewallSync.enable || config.networking.firewall.enable;
@@ -219,14 +726,33 @@ in {
           || config.networking.firewall.backend == "iptables";
         message = "services.amp.firewallSync supports only the NixOS iptables firewall backend.";
       }
+      {
+        assertion =
+          lib.intersectLists typedAdsSettingKeys extraAdsSettingKeys == [];
+        message = "services.amp.ads.settings.extraSettings must not duplicate a built-in ADS setting.";
+      }
+      {
+        assertion =
+          lib.intersectLists reservedAdsSettingKeys extraAdsSettingKeys == [];
+        message = "services.amp.ads.settings.extraSettings contains a bootstrap-owned ADS setting.";
+      }
+      {
+        assertion =
+          lib.all validAdsSettingKey extraAdsSettingKeys
+          && lib.all (setting: validAdsSettingValue setting.value) managedAdsSettings;
+        message = "services.amp.ads settings must be valid single-line AMP provisioning keys and values.";
+      }
     ];
 
+    # AMP downloads native executables after evaluation. Expose the conventional
+    # loader without enabling the full global programs.nix-ld environment.
     environment = {
       etc."ampinstmgr.conf".source = "${cfg.package}/share/ampinstmgr/ampinstmgr.conf";
       ldso = lib.mkOverride 900 "${pkgs.nix-ld}/libexec/nix-ld";
       systemPackages = [cfg.package];
     };
 
+    # Account and compatibility paths
     users = {
       groups.amp = {};
       users.amp =
@@ -245,6 +771,8 @@ in {
     };
 
     systemd = {
+      # Import upstream unit metadata, then correct commands and lifecycle
+      # behaviour through NixOS drop-ins below.
       packages = [cfg.package];
 
       # Root-level firewall commands still resolve the amp user through /home/amp.
@@ -252,12 +780,14 @@ in {
         "10-amp"."/home/amp".L.argument = cfg.home;
       };
 
+      # Core upstream services
       services =
         {
           ampinstmgr =
             {
               overrideStrategy = "asDropin";
               wantedBy = ["multi-user.target"];
+              # A NixOS switch must not interrupt running game instances.
               restartIfChanged = false;
               stopIfChanged = false;
               path = ampServicePath;
@@ -268,17 +798,17 @@ in {
                 WorkingDirectory = ampRoot;
                 ExecStart = [
                   ""
-                  "${ampServiceCommand} startboot true"
+                  "${ampinstmgrServiceExe} startboot true"
                 ];
                 ExecStop = [
                   ""
-                  "${ampServiceCommand} stopall"
+                  "${ampinstmgrServiceExe} stopall"
                 ];
                 TimeoutStartSec = cfg.startTimeout;
                 TimeoutStopSec = cfg.stopTimeout;
               };
             }
-            // podmanService;
+            // podmanUnitOrdering;
 
           amptasks =
             {
@@ -292,12 +822,13 @@ in {
                 WorkingDirectory = ampRoot;
                 ExecStart = [
                   ""
-                  "${ampServiceCommand} ProcessPendingTasks"
+                  "${ampinstmgrServiceExe} ProcessPendingTasks"
                 ];
               };
             }
-            // podmanService;
+            // podmanUnitOrdering;
         }
+        # Privileged firewall synchronisation
         // lib.optionalAttrs cfg.firewallSync.enable {
           ampfirewall-bridge = {
             description = "AMP firewall bridge";
@@ -341,7 +872,10 @@ in {
             environment =
               serviceEnvironment
               // {DOTNET_BUNDLE_EXTRACT_BASE_DIR = "/var/cache/ampfirewall";};
-            unitConfig.RequiresMountsFor = [cfg.home];
+            unitConfig = {
+              RequiresMountsFor = [cfg.home];
+              StartLimitIntervalSec = 0;
+            };
             serviceConfig = {
               AmbientCapabilities = ["CAP_DAC_READ_SEARCH" "CAP_NET_ADMIN" "CAP_NET_RAW"];
               BindReadOnlyPaths =
@@ -363,6 +897,7 @@ in {
             };
           };
         }
+        # Optional rootless Podman event trigger
         // lib.optionalAttrs (cfg.firewallSync.enable && cfg.firewallSync.podman) {
           ampfirewall-watch = {
             description = "AMP Podman Firewall Watcher";
@@ -382,6 +917,8 @@ in {
               while IFS=$'\t' read -r status name; do
                 case "$status:$name" in
                   create:AMP_* | start:AMP_* | restart:AMP_* | stop:AMP_* | remove:AMP_* | update:AMP_*)
+                    # Let AMP finish persisting the container change before
+                    # asking its firewall inventory to reconcile.
                     sleep 2
                     systemctl start --no-block ampfirewall.service
                     ;;
@@ -393,8 +930,77 @@ in {
               RestartSec = 5;
             };
           };
+        }
+        # ADS bootstrap and declarative reconciliation
+        // lib.optionalAttrs (adsBootstrap != null) {
+          ampads-bootstrap = lib.mkMerge [
+            {
+              description = "Bootstrap the AMP ADS01 instance";
+              after = [
+                "ampinstmgr.service"
+                "network-online.target"
+              ];
+              wantedBy = ["multi-user.target"];
+              wants = ["network-online.target"];
+              path = ampServicePath;
+              environment = serviceEnvironment;
+              unitConfig = {
+                RequiresMountsFor = [cfg.home];
+                StartLimitIntervalSec = 0;
+              };
+              serviceConfig = {
+                ExecStart = lib.getExe adsBootstrapCommand;
+                ExecStartPre = ampHomeCondition;
+                Group = "amp";
+                LoadCredential =
+                  ["admin-password:${adsBootstrap.adminPasswordFile}"]
+                  ++ lib.optional (adsBootstrap.licenceKeyFile != null)
+                  "licence-key:${adsBootstrap.licenceKeyFile}";
+                # ponytail: AMP starts persistent ADS children from this oneshot;
+                # replace this when upstream exposes a detached lifecycle.
+                KillMode = "none";
+                Type = "oneshot";
+                User = "amp";
+                WorkingDirectory = ampRoot;
+              };
+            }
+            podmanUnitOrdering
+          ];
+        }
+        // lib.optionalAttrs adsSettingsEnabled {
+          ampads-reconcile = lib.mkMerge [
+            {
+              description = "Reconcile declarative AMP ADS01 settings";
+              after =
+                ["ampinstmgr.service"]
+                ++ lib.optional (adsBootstrap != null) "ampads-bootstrap.service";
+              requires =
+                lib.optional (adsBootstrap != null) "ampads-bootstrap.service";
+              wantedBy = [
+                "multi-user.target"
+                "sysinit-reactivation.target"
+              ];
+              restartTriggers = [adsSettingsManifest];
+              path = ampServicePath;
+              environment = serviceEnvironment;
+              unitConfig.RequiresMountsFor = [cfg.home];
+              serviceConfig = {
+                ExecCondition = ampHomeCondition;
+                ExecStart = lib.getExe adsReconcileCommand;
+                Group = "amp";
+                # ponytail: reconfiguration may restart ADS as a child process.
+                KillMode = "none";
+                RemainAfterExit = true;
+                Type = "oneshot";
+                User = "amp";
+                WorkingDirectory = ampRoot;
+              };
+            }
+            podmanUnitOrdering
+          ];
         };
 
+      # ADS configuration changes and periodic firewall reconciliation
       paths = lib.optionalAttrs cfg.firewallSync.enable {
         ampfirewall-ads = {
           wantedBy = ["multi-user.target"];
@@ -418,6 +1024,8 @@ in {
             wantedBy = ["multi-user.target"];
             timerConfig = {
               AccuracySec = "1s";
+              # Retain upstream's one-minute run, then add bounded early-boot
+              # retries until the five-minute steady-state interval takes over.
               OnBootSec = [
                 "1m30s"
                 "2m"

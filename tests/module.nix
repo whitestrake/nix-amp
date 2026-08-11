@@ -3,12 +3,15 @@
   lib,
   pkgs,
 }: let
+  # This file-backed AMP emulator models only the command surface the module
+  # consumes. Files under /run/amp-test deliberately inject lifecycle failures
+  # so the VM can exercise recovery and timeout paths deterministically.
   fakeAmpinstmgr = pkgs.symlinkJoin {
     name = "fake-ampinstmgr";
     paths = [
       (pkgs.writeShellApplication {
         name = "ampinstmgr";
-        runtimeInputs = [pkgs.coreutils];
+        runtimeInputs = [pkgs.coreutils pkgs.gawk];
         text = ''
           operation="$1"
           shift
@@ -25,6 +28,12 @@
             root_home=visible
           fi
 
+          case "$operation" in
+            create) logged_args="<redacted-bootstrap-arguments>" ;;
+            reactivate) logged_args="ADS01 <redacted-licence-key>" ;;
+            *) logged_args="$*" ;;
+          esac
+
           printf \
             'uid=%s gid=%s capabilities=%s root_home=%s home=%s cwd=%s term=%s nix_ld=%s libraries=%s manager=%s xdg=%s docker=%s argv=%s%s\n' \
             "$(id -u)" \
@@ -40,15 +49,198 @@
             "''${XDG_RUNTIME_DIR-}" \
             "''${DOCKER_HOST-}" \
             "$operation" \
-            "''${*:+ $*}" \
+            "''${logged_args:+ $logged_args}" \
             >> /run/amp-test/invocations
 
-          if test "$operation" = ProcessPendingTasks; then
-            sleep 300 &
-            echo "$!" > /run/amp-test/pending-child.pid
-          fi
+          # Mutable ADS01 state and configuration model
+          instance="$HOME/.ampdata/instances/ADS01"
+
+          set_setting() {
+            provisioning_key="$1"
+            value="$2"
+            case "$provisioning_key" in
+              Core.*)
+                file="$instance/AMPConfig.conf"
+                key="''${provisioning_key#Core.}"
+                ;;
+              *.*)
+                area="''${provisioning_key%%.*}"
+                file="$instance/$area.kvp"
+                key="''${provisioning_key#*.}"
+                ;;
+              *) exit 64 ;;
+            esac
+
+            install -d "$instance"
+            touch "$file"
+            awk -F= -v key="$key" -v value="$value" '
+              BEGIN { found = 0 }
+              $1 == key {
+                if (!found) print key "=" value
+                found = 1
+                next
+              }
+              { print }
+              END {
+                if (!found) print key "=" value
+              }
+            ' "$file" > "$file.new"
+            mv "$file.new" "$file"
+          }
+
+          start_ads_now() {
+            rm -f "$instance/.starting"
+            touch "$instance/.running"
+            sleep 300 >/dev/null 2>&1 &
+            printf '%s\n' "$!" > "$instance/.running-pid"
+          }
+
+          # Lifecycle controls consult /run/amp-test markers to emulate delayed,
+          # asynchronous, failed, or permanently hung upstream operations.
+          start_ads() {
+            if test -e /run/amp-test/start-never; then
+              return
+            fi
+            if test -e /run/amp-test/start-async; then
+              touch "$instance/.starting"
+              rm -f "$instance/.status-attempts"
+              return
+            fi
+            start_ads_now
+          }
+
+          stop_ads() {
+            if test -e /run/amp-test/stop-hang; then
+              printf '%s\n' "$$" > /run/amp-test/stop-hang-pid
+              trap -- "" TERM
+              sleep 300
+            fi
+            if test -e /run/amp-test/stop-delay; then
+              sleep 5
+            fi
+            if test -e "$instance/.running-pid"; then
+              read -r pid < "$instance/.running-pid"
+              kill "$pid" 2>/dev/null || true
+            fi
+            rm -f \
+              "$instance/.running" \
+              "$instance/.running-pid" \
+              "$instance/.starting" \
+              "$instance/.status-attempts"
+          }
+
+          # Minimal ampinstmgr command surface used by the module
+          case "$operation" in
+            ProcessPendingTasks)
+              sleep 300 &
+              echo "$!" > /run/amp-test/pending-child.pid
+              ;;
+            status)
+              if test -e /run/amp-test/status-fail; then
+                exit 70
+              fi
+              if test -e /run/amp-test/status-fail-next; then
+                rm /run/amp-test/status-fail-next
+                exit 70
+              fi
+              if test -e /run/amp-test/status-fail-after-one; then
+                mv \
+                  /run/amp-test/status-fail-after-one \
+                  /run/amp-test/status-fail-next
+              fi
+              if test -e "$instance/.registered"; then
+                if test -e "$instance/.starting"; then
+                  attempts=0
+                  test ! -e "$instance/.status-attempts" ||
+                    read -r attempts < "$instance/.status-attempts"
+                  attempts=$((attempts + 1))
+                  printf '%s\n' "$attempts" > "$instance/.status-attempts"
+                  if test "$attempts" -ge 2; then
+                    rm "$instance/.starting"
+                    start_ads_now
+                  fi
+                fi
+                if test -e "$instance/.running"; then
+                  running="✓"
+                else
+                  running=""
+                fi
+                printf 'ADS01 ADS01 ADS 0.0.0.0 8080 %s\n' "$running"
+              fi
+              ;;
+            create)
+              test "$1" = ADS
+              test "$2" = ADS01
+              bind_address="$3"
+              port="$4"
+              test -z "$5"
+              admin_username="$6"
+              admin_password="$7"
+              shift 7
+
+              if test -z "$admin_username"; then
+                exit 64
+              fi
+              case "$admin_password" in
+                base64:*)
+                  decoded="$(
+                    printf %s "''${admin_password#base64:}" | base64 -d
+                  )"
+                  test -n "$decoded"
+                  ;;
+                *) exit 64 ;;
+              esac
+
+              install -d "$instance"
+              touch "$instance/.registered"
+              set_setting Core.Webserver.IPBinding "$bind_address"
+              set_setting Core.Webserver.Port "$port"
+
+              while test "$#" -gt 0; do
+                key="''${1#+}"
+                value="$2"
+                shift 2
+                set_setting "$key" "$value"
+              done
+              ;;
+            reactivate)
+              test "$1" = ADS01
+              test -e "$instance/.registered"
+              test "$2" != invalid
+              stop_ads
+              touch "$instance/.licensed"
+              ;;
+            setstartboot)
+              test "$1" = ADS01
+              test "$2" = true
+              test -e "$instance/.registered"
+              touch "$instance/.start-on-boot"
+              ;;
+            startinstance)
+              test "$1" = ADS01
+              test -e "$instance/.registered"
+              start_ads
+              ;;
+            stopinstance)
+              test "$1" = ADS01
+              stop_ads
+              test ! -e /run/amp-test/stop-fail-after-effect
+              ;;
+            reconfigureinstance)
+              test "$1" = ADS01
+              shift
+              test ! -e /run/amp-test/reconfigure-fail
+              while test "$#" -gt 0; do
+                key="''${1#+}"
+                value="$2"
+                shift 2
+                set_setting "$key" "$value"
+              done
+              ;;
+          esac
         '';
       })
+      # Upstream configuration and units imported by module.nix
       (pkgs.writeTextDir "share/ampinstmgr/ampinstmgr.conf" ''
         ampinstmgr.startonboot=amp
         ampinstmgr.updatefirewall=amp
@@ -122,6 +314,7 @@
     ];
   };
 
+  # Podman event source used by the firewall watcher
   fakeJournalctl = pkgs.writeShellApplication {
     name = "journalctl";
     runtimeInputs = [pkgs.coreutils];
@@ -139,6 +332,7 @@
     '';
   };
 
+  # Shared module configuration for evaluation fixtures and both VM nodes
   baseModule = {
     imports = [ampModule];
 
@@ -156,6 +350,7 @@
     system.stateVersion = "26.05";
   };
 
+  # Successful configurations exercise defaults and optional feature shapes.
   validSystem = lib.nixosSystem {
     system = pkgs.stdenv.hostPlatform.system;
     modules = [baseModule];
@@ -204,6 +399,34 @@
     ];
   };
 
+  bootstrapSystem = lib.nixosSystem {
+    system = pkgs.stdenv.hostPlatform.system;
+    modules = [
+      baseModule
+      {
+        services.amp.ads.bootstrap.adminPasswordFile = "/run/secrets/amp-admin-password";
+        services.amp.ads.settings.createInContainers = true;
+        virtualisation.podman.enable = true;
+      }
+    ];
+  };
+
+  settingsSystem = lib.nixosSystem {
+    system = pkgs.stdenv.hostPlatform.system;
+    modules = [
+      baseModule
+      {
+        services.amp.ads.settings = {
+          createInContainers = true;
+          defaultAuthServerUrl = "http://host.containers.internal:8080/";
+          extraSettings."ADSModule.Defaults.ContainerManager" = "Automatic";
+        };
+      }
+    ];
+  };
+
+  # Failed evaluations keep each public validation boundary independently
+  # observable without booting a VM.
   tryHome = home:
     builtins.tryEval (
       (lib.nixosSystem {
@@ -221,6 +444,56 @@
   invalidStoreRootDot = tryHome "/nix/./store";
   invalidNestedHome = tryHome "/home/amp/data";
 
+  # ADS validation fixtures use the same evaluation-only pattern.
+  tryAds = ads:
+    builtins.tryEval (
+      (lib.nixosSystem {
+        system = pkgs.stdenv.hostPlatform.system;
+        modules = [
+          baseModule
+          {services.amp.ads = ads;}
+        ];
+      }).config.system.build.toplevel.drvPath
+    );
+
+  missingBootstrapPassword = tryAds {
+    bootstrap = {};
+  };
+  invalidOperationMode = tryAds {
+    bootstrap = {
+      adminPasswordFile = "/run/secrets/amp-admin-password";
+      operationMode = "Cluster";
+    };
+  };
+  collidingSetting = tryAds {
+    settings = {
+      createInContainers = true;
+      extraSettings."ADSModule.Defaults.UseDocker" = false;
+    };
+  };
+  reservedMode = tryAds {
+    settings.extraSettings."ADSModule.ADS.Mode" = "Standalone";
+  };
+  reservedBinding = tryAds {
+    settings.extraSettings."Core.Webserver.IPBinding" = "127.0.0.1";
+  };
+  reservedPort = tryAds {
+    settings.extraSettings."Core.Webserver.Port" = 8081;
+  };
+  malformedSetting = tryAds {
+    settings.extraSettings.NoDot = "value";
+  };
+  tabSetting = tryAds {
+    settings.extraSettings."ADSModule.Defaults.ContainerManager" = "Auto\tmatic";
+  };
+  carriageReturnSetting = tryAds {
+    settings.extraSettings."ADSModule.Defaults.ContainerManager" = "Auto\rmatic";
+  };
+  newlineSetting = tryAds {
+    settings.extraSettings."ADSModule.Defaults.ContainerManager" = "Auto\nmatic";
+  };
+
+  # Upstream service overrides and the default account
   contract = assert validSystem.config.systemd.services.ampinstmgr.restartIfChanged == false;
   assert validSystem.config.systemd.services.ampinstmgr.stopIfChanged == false;
   assert builtins.elem fakeAmpinstmgr validSystem.config.systemd.packages;
@@ -251,14 +524,17 @@
   == ["/home/amp"];
   assert (validSystem.config.systemd.services.ampfirewall.unitConfig.RequiresMountsFor or [])
   == ["/home/amp"];
+  assert validSystem.config.systemd.services.ampfirewall.unitConfig.StartLimitIntervalSec == 0;
   assert validSystem.config.systemd.services.ampinstmgr.serviceConfig.ExecCondition != [];
   assert validSystem.config.systemd.services.amptasks.serviceConfig.ExecCondition != [];
+  # Disabling the module removes every module-owned account and unit.
   assert !disabledSystem.config.services.amp.firewallSync.enable;
   assert !disabledSystem.config.services.amp.firewallSync.podman;
   assert !(disabledSystem.config.users.groups ? amp);
   assert !(disabledSystem.config.users.users ? amp);
   assert !(disabledSystem.config.systemd.services ? ampfirewall);
   assert !(disabledSystem.config.systemd.paths ? ampfirewall-ads);
+  # Rootless Podman defaults and service ordering
   assert podmanDefaultSystem.config.services.amp.firewallSync.enable;
   assert podmanDefaultSystem.config.services.amp.firewallSync.podman;
   assert podmanDefaultSystem.config.users.users.amp.autoSubUidGidRange;
@@ -271,12 +547,32 @@
   assert builtins.elem
   "linger-users.service"
   podmanDefaultSystem.config.systemd.services.amptasks.after;
+  assert builtins.elem
+  "ampinstmgr.service"
+  bootstrapSystem.config.systemd.services.ampads-bootstrap.after;
+  assert builtins.elem
+  "network-online.target"
+  bootstrapSystem.config.systemd.services.ampads-bootstrap.after;
+  assert builtins.elem
+  "linger-users.service"
+  bootstrapSystem.config.systemd.services.ampads-bootstrap.after;
+  assert builtins.elem
+  "ampads-bootstrap.service"
+  bootstrapSystem.config.systemd.services.ampads-reconcile.after;
+  assert builtins.elem
+  "ampinstmgr.service"
+  bootstrapSystem.config.systemd.services.ampads-reconcile.after;
+  assert builtins.elem
+  "linger-users.service"
+  bootstrapSystem.config.systemd.services.ampads-reconcile.after;
+  # Explicit firewall opt-out removes every synchronisation trigger.
   assert podmanDefaultSystem.config.systemd.services ? ampfirewall-watch;
   assert !firewallOptOutSystem.config.services.amp.firewallSync.enable;
   assert !firewallOptOutSystem.config.services.amp.firewallSync.podman;
   assert !(firewallOptOutSystem.config.systemd.services ? ampfirewall);
   assert !(firewallOptOutSystem.config.systemd.paths ? ampfirewall-ads);
   assert !(firewallOptOutSystem.config.systemd.services ? ampfirewall-watch);
+  # Custom-home compatibility and path watching
   assert customHomeSystem.config.users.users.amp.home == "/var/lib/amp";
   assert customHomeSystem.config.systemd.paths.ampfirewall-ads.pathConfig.PathChanged
   == "/var/lib/amp/.ampdata/instances/ADS01/AMPConfig.conf";
@@ -295,6 +591,7 @@
   assert lib.all
   (warning: !(lib.hasInfix "services.amp.firewallSync may conflict" warning))
   validSystem.config.warnings;
+  # Firewall bridge lifecycle, privilege boundary, and retry schedule
   assert podmanDefaultSystem.config.systemd.services ? ampfirewall;
   assert podmanDefaultSystem.config.systemd.services ? ampfirewall-bridge;
   assert podmanDefaultSystem.config.systemd.services ? ampfirewall-watch;
@@ -348,12 +645,54 @@
   assert lib.hasInfix
   "systemctl start --no-block ampfirewall.service"
   validSystem.config.networking.firewall.extraCommands;
+  # Loader scope and rejected home paths
   assert !validSystem.config.programs.nix-ld.enable;
   assert !invalidStoreHome.success;
   assert !invalidStoreRoot.success;
   assert !invalidStoreRootDoubleSlash.success;
   assert !invalidStoreRootDot.success;
   assert !invalidNestedHome.success;
+  # ADS bootstrap, reconciliation, and input validation
+  assert bootstrapSystem.config.services.amp.ads.bootstrap.operationMode
+  == "Standalone";
+  assert bootstrapSystem.config.services.amp.ads.bootstrap.adminUsername
+  == "admin";
+  assert bootstrapSystem.config.services.amp.ads.bootstrap.bindAddress
+  == "0.0.0.0";
+  assert bootstrapSystem.config.services.amp.ads.bootstrap.port == 8080;
+  assert settingsSystem.config.services.amp.ads.settings.createInContainers
+  == true;
+  assert settingsSystem.config.services.amp.ads.settings.defaultAuthServerUrl
+  == "http://host.containers.internal:8080/";
+  assert settingsSystem.config.services.amp.ads.settings.extraSettings
+  == {"ADSModule.Defaults.ContainerManager" = "Automatic";};
+  assert bootstrapSystem.config.systemd.services ? ampads-bootstrap;
+  assert bootstrapSystem.config.systemd.services.ampads-bootstrap.serviceConfig.User
+  == "amp";
+  assert bootstrapSystem.config.systemd.services.ampads-bootstrap.serviceConfig.KillMode
+  == "none";
+  assert bootstrapSystem.config.systemd.services.ampads-bootstrap.serviceConfig.LoadCredential
+  == ["admin-password:/run/secrets/amp-admin-password"];
+  assert settingsSystem.config.systemd.services ? ampads-reconcile;
+  assert settingsSystem.config.systemd.services.ampads-reconcile.serviceConfig.User
+  == "amp";
+  assert settingsSystem.config.systemd.services.ampads-reconcile.serviceConfig.KillMode
+  == "none";
+  assert settingsSystem.config.systemd.services.ampads-reconcile.serviceConfig.RemainAfterExit;
+  assert !(validSystem.config.systemd.services ? ampads-bootstrap);
+  assert !(validSystem.config.systemd.services ? ampads-reconcile);
+  assert !(disabledSystem.config.systemd.services ? ampads-bootstrap);
+  assert !(disabledSystem.config.systemd.services ? ampads-reconcile);
+  assert !missingBootstrapPassword.success;
+  assert !invalidOperationMode.success;
+  assert !collidingSetting.success;
+  assert !reservedMode.success;
+  assert !reservedBinding.success;
+  assert !reservedPort.success;
+  assert !malformedSetting.success;
+  assert !tabSetting.success;
+  assert !carriageReturnSetting.success;
+  assert !newlineSetting.success;
     pkgs.runCommand "amp-module-contract" {} ''
       touch "$out"
     '';
@@ -388,16 +727,480 @@
           ]
         );
       };
+      bootstrap = {config, ...}: {
+        imports = [baseModule];
+        services.amp = {
+          home = "/var/lib/amp-bootstrap";
+          firewallSync.enable = false;
+          startTimeout = 2;
+          stopTimeout = 6;
+          ads.bootstrap = {
+            adminPasswordFile = "/run/amp-bootstrap/admin-password";
+            licenceKeyFile = "/run/amp-bootstrap/licence-key";
+          };
+          ads.settings.createInContainers = true;
+        };
+        systemd.services =
+          {
+            ampads-bootstrap.wantedBy = lib.mkForce [];
+          }
+          // lib.optionalAttrs (
+            config.services.amp.ads.settings.createInContainers != null
+          ) {
+            ampads-reconcile.wantedBy = lib.mkForce [];
+          };
+        specialisation."release-ads-settings".configuration = {
+          services.amp.ads.settings.createInContainers = lib.mkForce null;
+        };
+        specialisation."change-ads-settings".configuration = {
+          services.amp.ads.settings.createInContainers = lib.mkForce false;
+          systemd.services.ampads-reconcile.wantedBy =
+            lib.mkOverride 40 ["sysinit-reactivation.target"];
+        };
+      };
     };
 
     testScript = ''
       start_all()
 
-      for node in (machine, firewall):
+      for node in (machine, firewall, bootstrap):
           node.wait_for_unit("multi-user.target")
           node.wait_for_unit("ampinstmgr.service")
           node.wait_for_unit("amptasks.timer")
 
+      bootstrap.succeed(
+          "systemctl show ampads-reconcile.service -P Requires "
+          "| grep -Fw ampads-bootstrap.service"
+      )
+
+      # Phase 1: unattended ADS bootstrap and recovery
+      with subtest("credential-backed bootstrap is resumable and idempotent"):
+          bootstrap.succeed(
+              "install -d -m 0700 /run/amp-bootstrap "
+              "&& printf '%s\\n' test-admin-password "
+              "> /run/amp-bootstrap/admin-password "
+              "&& printf '%s\\n' invalid "
+              "> /run/amp-bootstrap/licence-key "
+              "&& chmod 0400 /run/amp-bootstrap/*"
+          )
+          bootstrap.fail("systemctl start ampads-bootstrap.service")
+          bootstrap.succeed(
+              "grep -Fx in-progress "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state"
+          )
+          bootstrap.succeed(
+              "test $(grep -c 'argv=create <redacted-bootstrap-arguments>' "
+              "/run/amp-test/invocations) = 1"
+          )
+          bootstrap.succeed(
+              "test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.start-on-boot "
+              "&& grep -F 'argv=setstartboot ADS01 true' "
+              "/run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "! grep -F test-admin-password /run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "! grep -F invalid /run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "printf '%s\\n' test-licence-key "
+              "> /run/amp-bootstrap/licence-key "
+              "&& chmod 0400 /run/amp-bootstrap/licence-key "
+              "&& systemctl reset-failed ampads-bootstrap.service "
+              "&& systemctl start ampads-bootstrap.service"
+          )
+          bootstrap.succeed(
+              "grep -Fx complete "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state"
+          )
+          bootstrap.succeed(
+              "grep -F 'argv=startinstance ADS01' /run/amp-test/invocations "
+              "&& test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running"
+          )
+          bootstrap.succeed(
+              "test $(grep -c 'argv=create <redacted-bootstrap-arguments>' "
+              "/run/amp-test/invocations) = 1"
+          )
+          bootstrap.succeed("systemctl start ampads-bootstrap.service")
+          bootstrap.succeed(
+              "test $(grep -c 'argv=create <redacted-bootstrap-arguments>' "
+              "/run/amp-test/invocations) = 1"
+          )
+          bootstrap.succeed(
+              "test $(grep -c 'argv=reactivate ADS01 <redacted-licence-key>' "
+              "/run/amp-test/invocations) = 2"
+          )
+
+      with subtest("complete bootstrap state still requires registered ADS"):
+          bootstrap.succeed(
+              "mv /var/lib/amp-bootstrap/.ampdata/instances/ADS01/.registered "
+              "/run/amp-test/registered "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-bootstrap.service")
+          bootstrap.succeed(
+              "grep -Fx complete "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state "
+              "&& ! grep -F 'argv=create ' /run/amp-test/invocations "
+              "&& mv /run/amp-test/registered "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.registered"
+          )
+
+      with subtest("complete bootstrap state propagates status failure"):
+          bootstrap.succeed(
+              "touch /run/amp-test/status-fail "
+              "&& systemctl reset-failed ampads-bootstrap.service"
+          )
+          bootstrap.fail("systemctl restart ampads-bootstrap.service")
+          bootstrap.succeed(
+              "rm /run/amp-test/status-fail "
+              "&& grep -Fx complete "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state"
+          )
+
+      with subtest("in-progress registered bootstrap starts stopped ADS"):
+          bootstrap.succeed(
+              "systemctl reset-failed ampads-bootstrap.service "
+              "&& kill \"$(cat "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running-pid)\" "
+              "&& rm "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running-pid "
+              "&& printf '%s\\n' in-progress "
+              "> /var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl restart ampads-bootstrap.service "
+              "&& grep -F 'argv=startinstance ADS01' "
+              "/run/amp-test/invocations "
+              "&& grep -Fx complete "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state"
+          )
+
+      with subtest("bootstrap refuses ambiguous or incomplete state"):
+          bootstrap.succeed(
+              "kill \"$(cat "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running-pid)\" "
+              "&& rm /var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state"
+          )
+          bootstrap.fail("systemctl start ampads-bootstrap.service")
+          bootstrap.succeed(
+              "rm -rf /var/lib/amp-bootstrap/.ampdata/instances/ADS01 "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp"
+          )
+          bootstrap.succeed(
+              "install -d "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01"
+          )
+          bootstrap.fail("systemctl start ampads-bootstrap.service")
+          bootstrap.succeed(
+              "test -d /var/lib/amp-bootstrap/.ampdata/instances/ADS01"
+          )
+
+      with subtest("bootstrap validates credentials before changing state"):
+          bootstrap.succeed(
+              "rm -rf /var/lib/amp-bootstrap/.ampdata/instances/ADS01 "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp "
+              "&& printf '%s\\n' test-admin-password "
+              "> /run/amp-bootstrap/admin-password "
+              "&& chmod 0400 /run/amp-bootstrap/admin-password "
+              "&& touch /run/amp-test/status-fail "
+              "&& systemctl reset-failed ampads-bootstrap.service"
+          )
+          bootstrap.fail("systemctl restart ampads-bootstrap.service")
+          bootstrap.succeed(
+              "rm /run/amp-test/status-fail "
+              "&& test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state "
+              "&& test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01 "
+              "&& rm /run/amp-bootstrap/admin-password"
+          )
+          bootstrap.fail("systemctl start ampads-bootstrap.service")
+          bootstrap.succeed(
+              "test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state "
+              "&& test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01"
+          )
+          bootstrap.succeed(
+              "install -m 0400 /dev/null "
+              "/run/amp-bootstrap/admin-password"
+          )
+          bootstrap.fail("systemctl start ampads-bootstrap.service")
+          bootstrap.succeed(
+              "test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/bootstrap-state "
+              "&& test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01"
+          )
+
+      # Phase 2: declarative ADS settings and lifecycle recovery
+      with subtest("managed ADS settings reconcile only when they drift"):
+          bootstrap.succeed(
+              "printf '%s\\n' test-admin-password "
+              "> /run/amp-bootstrap/admin-password "
+              "&& printf '%s\\n' test-licence-key "
+              "> /run/amp-bootstrap/licence-key "
+              "&& chmod 0400 /run/amp-bootstrap/* "
+              "&& systemctl reset-failed ampads-bootstrap.service "
+              "&& systemctl start ampads-bootstrap.service "
+              "&& systemctl start ampads-reconcile.service"
+          )
+          bootstrap.succeed(
+              "test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running"
+          )
+          bootstrap.succeed(
+              "kill -0 \"$(cat "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running-pid)\""
+          )
+          bootstrap.succeed(
+              "! grep -F 'argv=reconfigureinstance ADS01' "
+              "/run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl restart ampads-reconcile.service"
+          )
+          bootstrap.succeed(
+              "grep -Fx 'Defaults.UseDocker=True' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp"
+          )
+          bootstrap.succeed(
+              "grep -F 'argv=stopinstance ADS01' /run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "grep -F 'argv=reconfigureinstance ADS01 "
+              "+ADSModule.Defaults.UseDocker True' "
+              "/run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "grep -F 'argv=startinstance ADS01' /run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl restart ampads-reconcile.service "
+              "&& ! grep -Eq 'argv=(stopinstance|startinstance|reconfigureinstance)' "
+              "/run/amp-test/invocations"
+          )
+
+      with subtest("reconciliation propagates registration status failure"):
+          bootstrap.succeed(
+              "touch /run/amp-test/status-fail "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "rm /run/amp-test/status-fail "
+              "&& ! grep -Eq 'argv=(stopinstance|startinstance|reconfigureinstance)' "
+              "/run/amp-test/invocations"
+          )
+
+      with subtest("reconciliation propagates running status failure"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& touch /run/amp-test/status-fail-after-one "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl reset-failed ampads-reconcile.service"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "rm -f /run/amp-test/status-fail-next "
+              "&& ! grep -Eq 'argv=(stopinstance|startinstance|reconfigureinstance)' "
+              "/run/amp-test/invocations"
+          )
+
+      with subtest("reconciliation restores ADS after mutation failure"):
+          bootstrap.succeed(
+              "touch /run/amp-test/reconfigure-fail "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running"
+          )
+          bootstrap.succeed(
+              "rm /run/amp-test/reconfigure-fail "
+              "&& systemctl reset-failed ampads-reconcile.service "
+              "&& systemctl restart ampads-reconcile.service"
+          )
+
+      with subtest("reconciliation recovers when stop fails after taking effect"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& touch /run/amp-test/stop-fail-after-effect "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running "
+              "&& grep -F 'argv=stopinstance ADS01' /run/amp-test/invocations "
+              "&& grep -F 'argv=startinstance ADS01' /run/amp-test/invocations "
+              "&& rm /run/amp-test/stop-fail-after-effect "
+              "&& systemctl reset-failed ampads-reconcile.service "
+              "&& systemctl restart ampads-reconcile.service"
+          )
+
+      with subtest("reconciliation waits for asynchronous ADS restart"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& touch /run/amp-test/start-async "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl restart ampads-reconcile.service "
+              "&& test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running "
+              "&& test $(cat "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.status-attempts"
+              ") -ge 2 "
+              "&& rm /run/amp-test/start-async"
+          )
+
+      with subtest("ADS mutations share one lifecycle lock"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "systemd-run --unit=amp-test-lock-holder "
+              "${pkgs.util-linux}/bin/flock "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/lifecycle.lock "
+              "${pkgs.coreutils}/bin/sleep 5; "
+              "locked=false; for attempt in $(seq 1 20); do "
+              "if ! ${pkgs.util-linux}/bin/flock --nonblock "
+              "/var/lib/amp-bootstrap/.ampdata/.nix-amp/lifecycle.lock "
+              "true; then locked=true; break; fi; sleep 0.1; done; "
+              "test \"$locked\" = true"
+          )
+          bootstrap.succeed(
+              "started=$(date +%s) "
+              "&& systemctl restart ampads-reconcile.service "
+              "&& elapsed=$(($(date +%s) - started)) "
+              "&& test \"$elapsed\" -ge 3 "
+              "&& systemctl is-active --quiet ampads-reconcile.service "
+              "&& grep -F 'argv=reconfigureinstance ADS01' "
+              "/run/amp-test/invocations"
+          )
+
+      with subtest("reconciliation honours the ADS stop timeout"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& touch /run/amp-test/stop-delay "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl restart ampads-reconcile.service "
+              "&& test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running "
+              "&& grep -F 'argv=stopinstance ADS01' /run/amp-test/invocations "
+              "&& rm /run/amp-test/stop-delay"
+          )
+
+      with subtest("reconciliation kills a hung AMP stop command"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& touch /run/amp-test/stop-hang "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "pid=$(cat /run/amp-test/stop-hang-pid) "
+              "&& ! kill -0 \"$pid\" 2>/dev/null "
+              "&& test -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running "
+              "&& rm /run/amp-test/stop-hang /run/amp-test/stop-hang-pid "
+              "&& systemctl reset-failed ampads-reconcile.service "
+              "&& systemctl restart ampads-reconcile.service"
+          )
+
+      with subtest("reconciliation fails when ADS never restarts"):
+          bootstrap.succeed(
+              "sed -i 's/^Defaults.UseDocker=.*/Defaults.UseDocker=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& touch /run/amp-test/start-never "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "test ! -e "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.running "
+              "&& test $(grep -c 'argv=startinstance ADS01' "
+              "/run/amp-test/invocations) = 2 "
+              "&& rm /run/amp-test/start-never "
+              "&& su - amp -c 'NIX_LD=unused "
+              "NIX_LD_LIBRARY_PATH=unused TERM=xterm-256color "
+              "ampinstmgr startinstance ADS01' "
+              "&& systemctl reset-failed ampads-reconcile.service "
+              "&& systemctl restart ampads-reconcile.service"
+          )
+
+      with subtest("managed settings command skips an unregistered ADS"):
+          bootstrap.succeed(
+              "mv /var/lib/amp-bootstrap/.ampdata/instances/ADS01/.registered "
+              "/run/amp-test/registered "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& reconcile=$(sed -n 's/^ExecStart=//p' "
+              "/etc/systemd/system/ampads-reconcile.service) "
+              "&& su - amp -c 'NIX_LD=unused "
+              "NIX_LD_LIBRARY_PATH=unused TERM=xterm-256color '\"$reconcile\" "
+              "&& ! grep -Eq 'argv=(stopinstance|startinstance|reconfigureinstance)' "
+              "/run/amp-test/invocations "
+              "&& mv /run/amp-test/registered "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/.registered"
+          )
+
+      with subtest("duplicate managed keys fail before mutation"):
+          bootstrap.succeed(
+              "printf '%s\\n' 'Defaults.UseDocker=True' "
+              ">> /var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& truncate -s 0 /run/amp-test/invocations"
+          )
+          bootstrap.fail("systemctl restart ampads-reconcile.service")
+          bootstrap.succeed(
+              "! grep -Eq 'argv=(stopinstance|startinstance|reconfigureinstance)' "
+              "/run/amp-test/invocations"
+          )
+          bootstrap.succeed(
+              "sed -i '$d' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp"
+          )
+
+      with subtest("changed generation retries failed settings reconciliation"):
+          bootstrap.succeed(
+              "truncate -s 0 /run/amp-test/invocations "
+              "&& /run/current-system/specialisation/change-ads-settings/"
+              "bin/switch-to-configuration test "
+              "&& grep -Fx 'Defaults.UseDocker=False' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& grep -F 'argv=reconfigureinstance ADS01 "
+              "+ADSModule.Defaults.UseDocker False' "
+              "/run/amp-test/invocations"
+          )
+
+      with subtest("removing a managed setting releases it without reverting"):
+          bootstrap.succeed(
+              "/run/booted-system/specialisation/release-ads-settings/"
+              "bin/switch-to-configuration test"
+          )
+          bootstrap.succeed(
+              "test -z \"$(systemctl show ampads-reconcile.service -P ExecStart)\""
+          )
+          bootstrap.succeed(
+              "grep -Fx 'Defaults.UseDocker=False' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp"
+          )
+
+      # Phase 3: core account, package, and upstream service integration
       with subtest("account, state, config, and compatibility environment"):
           machine.succeed("test $(stat -c %U:%G /home/amp) = amp:amp")
           machine.succeed("test $(stat -c %a /home/amp) = 700")
@@ -470,7 +1273,8 @@
           machine.succeed("mv /home/amp.default /home/amp")
           machine.succeed("systemctl start ampinstmgr.service")
 
-      with subtest("opt-in firewall synchronization"):
+      # Phase 4: firewall bridge and rootless Podman integration
+      with subtest("opt-in firewall synchronisation"):
           firewall.wait_for_unit("ampfirewall-bridge.service")
           firewall.wait_for_unit("ampfirewall.timer")
           firewall.succeed(
@@ -645,7 +1449,7 @@
           firewall.succeed("iptables -P INPUT ACCEPT")
           firewall.succeed("systemctl start ampfirewall-bridge.service")
 
-      with subtest("disabling synchronization removes the firewall bridge"):
+      with subtest("disabling synchronisation removes the firewall bridge"):
           firewall.succeed(
               "/run/current-system/specialisation/firewall-sync-off/"
               "bin/switch-to-configuration test"
