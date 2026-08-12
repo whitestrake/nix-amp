@@ -77,16 +77,40 @@
         description = "Whether new AMP instances are created in containers.";
       };
 
+      containerManager = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Container manager used for new AMP instances.";
+      };
+
       useHostNetworkingForNewContainers = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;
         description = "Whether new containers use host networking.";
       };
 
+      autoStartInstances = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether AMP automatically starts managed instances.";
+      };
+
+      excludeNewInstancesFromFirewall = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether new instances are excluded from AMP firewall synchronisation.";
+      };
+
       defaultAuthServerUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Default AMP authentication server URL for new instances.";
+      };
+
+      propagateAuthServer = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether AMP propagates its authentication server to managed instances.";
       };
 
       defaultInstanceBindAddress = lib.mkOption {
@@ -99,6 +123,24 @@
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Default application bind address for new instances.";
+      };
+
+      allowAnalytics = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether AMP sends anonymous usage analytics to CubeCoders.";
+      };
+
+      autoReportFatalExceptions = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether AMP automatically reports fatal exceptions to CubeCoders.";
+      };
+
+      enhancedLicenceReporting = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether AMP sends enhanced licence usage reports to CubeCoders.";
       };
 
       extraSettings = lib.mkOption {
@@ -127,12 +169,28 @@
       value = cfg.ads.settings.createInContainers;
     }
     {
+      provisioningKey = "ADSModule.Defaults.ContainerManager";
+      value = cfg.ads.settings.containerManager;
+    }
+    {
       provisioningKey = "ADSModule.Network.UseDockerHostNetwork";
       value = cfg.ads.settings.useHostNetworkingForNewContainers;
     }
     {
+      provisioningKey = "ADSModule.ADS.AutostartInstances";
+      value = cfg.ads.settings.autoStartInstances;
+    }
+    {
+      provisioningKey = "ADSModule.Defaults.ExcludeFromFirewall";
+      value = cfg.ads.settings.excludeNewInstancesFromFirewall;
+    }
+    {
       provisioningKey = "ADSModule.Defaults.DefaultAuthServerURL";
       value = cfg.ads.settings.defaultAuthServerUrl;
+    }
+    {
+      provisioningKey = "ADSModule.Defaults.PropagateAuthServer";
+      value = cfg.ads.settings.propagateAuthServer;
     }
     {
       provisioningKey = "ADSModule.Network.DefaultIPBinding";
@@ -141,6 +199,18 @@
     {
       provisioningKey = "ADSModule.Network.DefaultAppIPBinding";
       value = cfg.ads.settings.defaultApplicationBindAddress;
+    }
+    {
+      provisioningKey = "Core.Privacy.AllowAnalytics";
+      value = cfg.ads.settings.allowAnalytics;
+    }
+    {
+      provisioningKey = "Core.Privacy.AutoReportFatalExceptions";
+      value = cfg.ads.settings.autoReportFatalExceptions;
+    }
+    {
+      provisioningKey = "Core.Privacy.EnhancedLicenceReporting";
+      value = cfg.ads.settings.enhancedLicenceReporting;
     }
   ];
   extraAdsSettings =

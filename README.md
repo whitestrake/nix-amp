@@ -157,10 +157,8 @@ NixOS configuration changes:
 ```nix
 services.amp.ads.settings = {
   createInContainers = true;
-  useHostNetworkingForNewContainers = false;
-  defaultAuthServerUrl = "http://host.containers.internal:8080/";
-  defaultInstanceBindAddress = "127.0.0.1";
-  defaultApplicationBindAddress = "0.0.0.0";
+  containerManager = "Automatic";
+  allowAnalytics = false;
 };
 ```
 
@@ -170,11 +168,29 @@ configuration, and starts ADS again. An unchanged switch leaves ADS running.
 A failed reconfiguration leaves the unit failed and attempts to restore an ADS
 instance that was running before reconciliation.
 
+Every typed setting defaults to `null`, which leaves that AMP setting
+unmanaged:
+
+| Area | Setting | Type | Purpose |
+| ---------------- | ------------------------------------------ | --------- | ---------------------------------------------------------------------- |
+| Deployment | `createInContainers` | boolean | Create new instances in containers. |
+| Deployment | `containerManager` | string | Select AMP's container manager, such as `Automatic`. |
+| Deployment | `autoStartInstances` | boolean | Start managed instances automatically with ADS. |
+| Deployment | `excludeNewInstancesFromFirewall` | boolean | Exclude new instances from AMP's firewall synchronisation. |
+| Networking | `useHostNetworkingForNewContainers` | boolean | Give new containers host networking. |
+| Networking | `defaultAuthServerUrl` | string | Set the authentication server URL for new instances. |
+| Networking | `propagateAuthServer` | boolean | Propagate ADS's authentication server to managed instances. |
+| Networking | `defaultInstanceBindAddress` | string | Set the web-interface bind address for new instances. |
+| Networking | `defaultApplicationBindAddress` | string | Set the application bind address for new instances. |
+| Privacy | `allowAnalytics` | boolean | Send anonymous usage analytics to CubeCoders. |
+| Privacy | `autoReportFatalExceptions` | boolean | Automatically report fatal exceptions to CubeCoders. |
+| Privacy | `enhancedLicenceReporting` | boolean | Send enhanced licence usage reports to CubeCoders. |
+
 Advanced users can pass additional non-secret AMP provisioning settings:
 
 ```nix
 services.amp.ads.settings.extraSettings = {
-  "ADSModule.Defaults.ContainerManager" = "Automatic";
+  "ADSModule.Defaults.DefaultReleaseStream" = "Mainline";
 };
 ```
 

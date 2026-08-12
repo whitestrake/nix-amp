@@ -418,8 +418,15 @@
       {
         services.amp.ads.settings = {
           createInContainers = true;
+          containerManager = "Automatic";
+          autoStartInstances = true;
+          excludeNewInstancesFromFirewall = false;
+          propagateAuthServer = true;
           defaultAuthServerUrl = "http://host.containers.internal:8080/";
-          extraSettings."ADSModule.Defaults.ContainerManager" = "Automatic";
+          allowAnalytics = false;
+          autoReportFatalExceptions = false;
+          enhancedLicenceReporting = false;
+          extraSettings."ADSModule.Defaults.DefaultReleaseStream" = "Mainline";
         };
       }
     ];
@@ -665,7 +672,7 @@
   assert settingsSystem.config.services.amp.ads.settings.defaultAuthServerUrl
   == "http://host.containers.internal:8080/";
   assert settingsSystem.config.services.amp.ads.settings.extraSettings
-  == {"ADSModule.Defaults.ContainerManager" = "Automatic";};
+  == {"ADSModule.Defaults.DefaultReleaseStream" = "Mainline";};
   assert bootstrapSystem.config.systemd.services ? ampads-bootstrap;
   assert bootstrapSystem.config.systemd.services.ampads-bootstrap.serviceConfig.User
   == "amp";
@@ -738,7 +745,16 @@
             adminPasswordFile = "/run/amp-bootstrap/admin-password";
             licenceKeyFile = "/run/amp-bootstrap/licence-key";
           };
-          ads.settings.createInContainers = true;
+          ads.settings = {
+            createInContainers = true;
+            containerManager = "Automatic";
+            autoStartInstances = true;
+            excludeNewInstancesFromFirewall = false;
+            propagateAuthServer = true;
+            allowAnalytics = false;
+            autoReportFatalExceptions = false;
+            enhancedLicenceReporting = false;
+          };
         };
         systemd.services =
           {
@@ -750,7 +766,16 @@
             ampads-reconcile.wantedBy = lib.mkForce [];
           };
         specialisation."release-ads-settings".configuration = {
-          services.amp.ads.settings.createInContainers = lib.mkForce null;
+          services.amp.ads.settings = {
+            createInContainers = lib.mkForce null;
+            containerManager = lib.mkForce null;
+            autoStartInstances = lib.mkForce null;
+            excludeNewInstancesFromFirewall = lib.mkForce null;
+            propagateAuthServer = lib.mkForce null;
+            allowAnalytics = lib.mkForce null;
+            autoReportFatalExceptions = lib.mkForce null;
+            enhancedLicenceReporting = lib.mkForce null;
+          };
         };
         specialisation."change-ads-settings".configuration = {
           services.amp.ads.settings.createInContainers = lib.mkForce false;
@@ -832,6 +857,22 @@
           bootstrap.succeed(
               "test $(grep -c 'argv=reactivate ADS01 <redacted-licence-key>' "
               "/run/amp-test/invocations) = 2"
+          )
+          bootstrap.succeed(
+              "grep -Fx 'Defaults.ContainerManager=Automatic' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& grep -Fx 'ADS.AutostartInstances=True' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& grep -Fx 'Defaults.ExcludeFromFirewall=False' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& grep -Fx 'Defaults.PropagateAuthServer=True' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& grep -Fx 'Privacy.AllowAnalytics=False' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf "
+              "&& grep -Fx 'Privacy.AutoReportFatalExceptions=False' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf "
+              "&& grep -Fx 'Privacy.EnhancedLicenceReporting=False' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf"
           )
 
       with subtest("complete bootstrap state still requires registered ADS"):
