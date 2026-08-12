@@ -859,10 +859,16 @@ in {
       # behaviour through NixOS drop-ins below.
       packages = [cfg.package];
 
-      # Root-level firewall commands still resolve the amp user through /home/amp.
-      tmpfiles.settings = lib.optionalAttrs (cfg.home != "/home/amp") {
-        "10-amp"."/home/amp".L.argument = cfg.home;
-      };
+      tmpfiles.settings."10-amp" =
+        {
+          # AMP removes instances through this absolute Debian path.
+          "/bin/rm".L.argument = "${pkgs.coreutils}/bin/rm";
+        }
+        # Root-level firewall commands still resolve custom homes through
+        # /home/amp.
+        // lib.optionalAttrs (cfg.home != "/home/amp") {
+          "/home/amp".L.argument = cfg.home;
+        };
 
       # Core upstream services
       services =

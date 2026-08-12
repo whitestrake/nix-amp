@@ -527,6 +527,8 @@
   assert validSystem.config.users.users.amp.home == "/home/amp";
   assert validSystem.config.users.users.amp.homeMode == "0700";
   assert validSystem.config.users.users.amp.createHome;
+  assert validSystem.config.systemd.tmpfiles.settings."10-amp"."/bin/rm".L.argument
+  == "${pkgs.coreutils}/bin/rm";
   assert validSystem.config.services.amp.firewallSync.enable;
   assert !validSystem.config.services.amp.firewallSync.podman;
   assert validSystem.config.systemd.services ? ampfirewall;
@@ -602,7 +604,7 @@
   == "/var/lib/amp";
   assert spacedHomeSystem.config.systemd.tmpfiles.settings."10-amp"."/home/amp".L.argument
   == "/srv/AMP Data";
-  assert !(validSystem.config.systemd.tmpfiles.settings ? "10-amp");
+  assert !(validSystem.config.systemd.tmpfiles.settings."10-amp" ? "/home/amp");
   assert lib.all
   (warning: !(lib.hasInfix "services.amp.firewallSync may conflict" warning))
   validSystem.config.warnings;
@@ -1275,6 +1277,11 @@
           machine.succeed(
               r"""readlink -f /lib64/ld-linux-x86-64.so.2 """
               r"""| grep -E '^/nix/store/.*-nix-ld-[^/]+/bin/nix-ld$'"""
+          )
+          machine.succeed(
+              "touch /tmp/amp-rm-test "
+              "&& /bin/rm /tmp/amp-rm-test "
+              "&& test ! -e /tmp/amp-rm-test"
           )
           machine.succeed(
               r"""grep -E 'uid=[0-9]+ gid=[0-9]+ capabilities=[0-9a-f]+ root_home=hidden home=/home/amp """
