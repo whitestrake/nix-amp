@@ -413,6 +413,10 @@
           "$password_argument"
           +ADSModule.ADS.Mode
           ${lib.escapeShellArg adsBootstrap.operationMode}
+          ${lib.optionalString (adsBootstrap.licenceKeyFile != null) ''
+        +ADSModule.Defaults.NewInstanceKey
+        "$licence"
+      ''}
           ${lib.concatMapStringsSep "\n          " (setting:
         lib.escapeShellArgs [
           "+${setting.provisioningKey}"
@@ -433,6 +437,16 @@
       run_amp setstartboot ADS01 true
 
       if test -n "$licence"; then
+        if test "$current_state" = in-progress; then
+          read_status
+          if ads_running; then
+            run_amp stopinstance ADS01
+          fi
+          run_amp reconfigureinstance \
+            ADS01 \
+            +ADSModule.Defaults.NewInstanceKey \
+            "$licence"
+        fi
         run_amp reactivate ADS01 "$licence"
         unset licence
       fi

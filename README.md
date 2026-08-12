@@ -130,6 +130,10 @@ passes them to the `amp` bootstrap service as credentials. Keep them available
 while `ads.bootstrap` remains configured; after bootstrap completes, you may
 remove that option and retire the files.
 
+When supplied, AMP stores the licence key in its mutable ADS configuration so
+new instances can be activated. Protect `.ampdata` snapshots and backups as
+secret-bearing state.
+
 Bootstrap creates only a new `ADS01`. It refuses to adopt or overwrite an
 existing instance without its `.ampdata/.nix-amp/bootstrap-state` completion
 marker. A failed partial bootstrap must be recovered or removed explicitly

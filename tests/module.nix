@@ -31,6 +31,14 @@
           case "$operation" in
             create) logged_args="<redacted-bootstrap-arguments>" ;;
             reactivate) logged_args="ADS01 <redacted-licence-key>" ;;
+            reconfigureinstance)
+              case "$*" in
+                *"+ADSModule.Defaults.NewInstanceKey"*)
+                  logged_args="ADS01 +ADSModule.Defaults.NewInstanceKey <redacted-licence-key>"
+                  ;;
+                *) logged_args="$*" ;;
+              esac
+              ;;
             *) logged_args="$*" ;;
           esac
 
@@ -859,6 +867,11 @@
               "/run/amp-test/invocations) = 2"
           )
           bootstrap.succeed(
+              "grep -Fx 'Defaults.NewInstanceKey=test-licence-key' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& ! grep -F test-licence-key /run/amp-test/invocations"
+          )
+          bootstrap.succeed(
               "grep -Fx 'Defaults.ContainerManager=Automatic' "
               "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
               "&& grep -Fx 'ADS.AutostartInstances=True' "
@@ -988,6 +1001,7 @@
               "&& chmod 0400 /run/amp-bootstrap/* "
               "&& systemctl reset-failed ampads-bootstrap.service "
               "&& systemctl start ampads-bootstrap.service "
+              "&& truncate -s 0 /run/amp-test/invocations "
               "&& systemctl start ampads-reconcile.service"
           )
           bootstrap.succeed(
