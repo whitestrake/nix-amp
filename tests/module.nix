@@ -431,6 +431,7 @@
           excludeNewInstancesFromFirewall = false;
           propagateAuthServer = true;
           defaultAuthServerUrl = "http://host.containers.internal:8080/";
+          enablePassthruAuth = true;
           allowAnalytics = false;
           autoReportFatalExceptions = false;
           enhancedLicenceReporting = false;
@@ -681,6 +682,8 @@
   == true;
   assert settingsSystem.config.services.amp.ads.settings.defaultAuthServerUrl
   == "http://host.containers.internal:8080/";
+  assert settingsSystem.config.services.amp.ads.settings.enablePassthruAuth
+  == true;
   assert settingsSystem.config.services.amp.ads.settings.extraSettings
   == {"ADSModule.Defaults.DefaultReleaseStream" = "Mainline";};
   assert bootstrapSystem.config.systemd.services ? ampads-bootstrap;
@@ -761,6 +764,7 @@
             autoStartInstances = true;
             excludeNewInstancesFromFirewall = false;
             propagateAuthServer = true;
+            enablePassthruAuth = true;
             allowAnalytics = false;
             autoReportFatalExceptions = false;
             enhancedLicenceReporting = false;
@@ -783,6 +787,7 @@
             autoStartInstances = lib.mkForce null;
             excludeNewInstancesFromFirewall = lib.mkForce null;
             propagateAuthServer = lib.mkForce null;
+            enablePassthruAuth = lib.mkForce null;
             allowAnalytics = lib.mkForce null;
             autoReportFatalExceptions = lib.mkForce null;
             enhancedLicenceReporting = lib.mkForce null;
@@ -883,6 +888,8 @@
               "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
               "&& grep -Fx 'Defaults.PropagateAuthServer=True' "
               "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/ADSModule.kvp "
+              "&& grep -Fx 'Security.EnablePassthruAuth=True' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf "
               "&& grep -Fx 'Privacy.AllowAnalytics=False' "
               "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf "
               "&& grep -Fx 'Privacy.AutoReportFatalExceptions=False' "

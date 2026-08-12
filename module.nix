@@ -113,6 +113,12 @@
         description = "Whether AMP propagates its authentication server to managed instances.";
       };
 
+      enablePassthruAuth = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Whether ADS accepts authentication requests from managed instances.";
+      };
+
       defaultInstanceBindAddress = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -191,6 +197,10 @@
     {
       provisioningKey = "ADSModule.Defaults.PropagateAuthServer";
       value = cfg.ads.settings.propagateAuthServer;
+    }
+    {
+      provisioningKey = "Core.Security.EnablePassthruAuth";
+      value = cfg.ads.settings.enablePassthruAuth;
     }
     {
       provisioningKey = "ADSModule.Network.DefaultIPBinding";

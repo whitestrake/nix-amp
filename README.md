@@ -162,6 +162,7 @@ NixOS configuration changes:
 services.amp.ads.settings = {
   createInContainers = true;
   containerManager = "Automatic";
+  enablePassthruAuth = true;
   allowAnalytics = false;
 };
 ```
@@ -184,6 +185,7 @@ unmanaged:
 | Networking | `useHostNetworkingForNewContainers` | boolean | Give new containers host networking. |
 | Networking | `defaultAuthServerUrl` | string | Set the authentication server URL for new instances. |
 | Networking | `propagateAuthServer` | boolean | Propagate ADS's authentication server to managed instances. |
+| Authentication | `enablePassthruAuth` | boolean | Allow managed instances to authenticate through ADS. |
 | Networking | `defaultInstanceBindAddress` | string | Set the web-interface bind address for new instances. |
 | Networking | `defaultApplicationBindAddress` | string | Set the application bind address for new instances. |
 | Privacy | `allowAnalytics` | boolean | Send anonymous usage analytics to CubeCoders. |
