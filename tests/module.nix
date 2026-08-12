@@ -768,6 +768,7 @@
         };
         systemd.services =
           {
+            ampinstmgr.serviceConfig.TimeoutStartSec = lib.mkForce 30;
             ampads-bootstrap.wantedBy = lib.mkForce [];
           }
           // lib.optionalAttrs (
