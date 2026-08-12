@@ -1,32 +1,54 @@
 {
   description = "Unofficial Nix package and NixOS module for CubeCoders AMP";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    treefmt-nix = {
-      url = "github:numtide/treefmt-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   outputs = {
     self,
     nixpkgs,
-    treefmt-nix,
   }: let
     system = "x86_64-linux";
-    pkgs = import nixpkgs {
-      inherit system;
-      config.allowUnfreePredicate = package:
-        builtins.elem (nixpkgs.lib.getName package) ["ampinstmgr"];
-    };
+    mkPkgs = system:
+      import nixpkgs {
+        inherit system;
+        config.allowUnfreePredicate = package:
+          builtins.elem (nixpkgs.lib.getName package) ["ampinstmgr"];
+      };
+    pkgs = mkPkgs system;
+    mkFormatter = pkgs:
+      pkgs.writeShellApplication {
+        name = "treefmt";
+        runtimeInputs = with pkgs; [
+          actionlint
+          alejandra
+          mdformat
+          nil
+          shellcheck
+          treefmt
+          yamlfmt
+        ];
+        text = ''
+          exec ${nixpkgs.lib.getExe pkgs.treefmt} \
+            --config-file ${./treefmt.toml} \
+            --tree-root-file flake.nix \
+            "$@"
+        '';
+      };
+    formatter = mkFormatter pkgs;
+    formatting =
+      pkgs.runCommand "formatting" {
+        nativeBuildInputs = [formatter pkgs.gitMinimal];
+      } ''
+        cp -r ${self} source
+        chmod -R u+w source
+        cd source
+        git init --quiet
+        git add .
+        treefmt --ci
+        touch "$out"
+      '';
+    darwinFormatter = mkFormatter (mkPkgs "aarch64-darwin");
     ampinstmgr = pkgs.callPackage ./package.nix {};
-    treefmt = treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
-    darwinTreefmt =
-      treefmt-nix.lib.evalModule (import nixpkgs {
-        system = "aarch64-darwin";
-      })
-      ./treefmt.nix;
   in {
     packages.${system} = {
       inherit ampinstmgr;
@@ -53,12 +75,12 @@
         lib = nixpkgs.lib;
       }
       // {
-        formatting = treefmt.config.build.check self;
+        inherit formatting;
       };
 
     formatter = {
-      ${system} = treefmt.config.build.wrapper;
-      aarch64-darwin = darwinTreefmt.config.build.wrapper;
+      ${system} = formatter;
+      aarch64-darwin = darwinFormatter;
     };
   };
 }

@@ -1,0 +1,56 @@
+excludes = [
+  "*.lock",
+  "*.patch",
+  "package-lock.json",
+  "go.mod",
+  "go.sum",
+  ".gitattributes",
+  ".gitignore",
+  ".gitmodules",
+  ".hgignore",
+  ".svnignore",
+  "LICENSE",
+]
+
+[formatter.actionlint]
+command = "actionlint"
+includes = [
+  ".github/workflows/*.yml",
+  ".github/workflows/*.yaml",
+  ".gitea/workflows/*.yml",
+  ".gitea/workflows/*.yaml",
+  ".forgejo/workflows/*.yml",
+  ".forgejo/workflows/*.yaml",
+]
+options = ["-config-file", ".github/actionlint.yaml"]
+
+[formatter.alejandra]
+command = "alejandra"
+includes = ["*.nix"]
+
+[formatter.mdformat]
+command = "mdformat"
+includes = ["*.md"]
+options = ["--wrap", "keep"]
+
+[formatter.nil]
+command = "nil"
+includes = ["*.nix"]
+options = ["diagnostics", "--deny-warnings"]
+type = "check"
+
+[formatter.shellcheck]
+command = "shellcheck"
+includes = ["*.sh", "*.bash", "*.envrc", "*.envrc.*"]
+options = ["-x"]
+
+[formatter.yamlfmt]
+command = "yamlfmt"
+includes = ["*.yaml", "*.yml"]
+options = [
+  "-no_global_conf",
+  "-formatter", "type=basic",
+  "-formatter", "retain_line_breaks=true",
+  "-formatter", "scan_folded_as_literal=true",
+  "-formatter", "eof_newline=true",
+]
