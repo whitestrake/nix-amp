@@ -208,7 +208,9 @@
                 key="''${1#+}"
                 value="$2"
                 shift 2
-                set_setting "$key" "$value"
+                if test "$key" != Core.Security.EnablePassthruAuth; then
+                  set_setting "$key" "$value"
+                fi
               done
               ;;
             reactivate)
@@ -242,7 +244,9 @@
                 key="''${1#+}"
                 value="$2"
                 shift 2
-                set_setting "$key" "$value"
+                if test "$key" != Core.Security.EnablePassthruAuth; then
+                  set_setting "$key" "$value"
+                fi
               done
               ;;
           esac
@@ -1052,6 +1056,22 @@
               "&& systemctl restart ampads-reconcile.service "
               "&& ! grep -Eq 'argv=(stopinstance|startinstance|reconfigureinstance)' "
               "/run/amp-test/invocations"
+          )
+
+      with subtest("passthrough authentication uses stopped-file reconciliation"):
+          bootstrap.succeed(
+              "sed -i "
+              "'s/^Security.EnablePassthruAuth=.*/Security.EnablePassthruAuth=False/' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf "
+              "&& truncate -s 0 /run/amp-test/invocations "
+              "&& systemctl restart ampads-reconcile.service"
+          )
+          bootstrap.succeed(
+              "grep -Fx 'Security.EnablePassthruAuth=True' "
+              "/var/lib/amp-bootstrap/.ampdata/instances/ADS01/AMPConfig.conf "
+              "&& grep -F 'argv=stopinstance ADS01' /run/amp-test/invocations "
+              "&& grep -F 'argv=startinstance ADS01' /run/amp-test/invocations "
+              "&& ! grep -F EnablePassthruAuth /run/amp-test/invocations"
           )
 
       with subtest("reconciliation propagates registration status failure"):

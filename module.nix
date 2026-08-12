@@ -169,6 +169,7 @@
       then "True"
       else "False"
     else toString value;
+  passthruAuthProvisioningKey = "Core.Security.EnablePassthruAuth";
   typedAdsSettings = lib.filter (setting: setting.value != null) [
     {
       provisioningKey = "ADSModule.Defaults.UseDocker";
@@ -199,7 +200,7 @@
       value = cfg.ads.settings.propagateAuthServer;
     }
     {
-      provisioningKey = "Core.Security.EnablePassthruAuth";
+      provisioningKey = passthruAuthProvisioningKey;
       value = cfg.ads.settings.enablePassthruAuth;
     }
     {
@@ -265,6 +266,10 @@
     lib.sort
     (left: right: left.provisioningKey < right.provisioningKey)
     (map toManagedAdsFileSetting (typedAdsSettings ++ extraAdsSettings));
+  reconfigurableAdsSettings =
+    lib.filter
+    (setting: setting.provisioningKey != passthruAuthProvisioningKey)
+    managedAdsSettings;
   adsSettingsEnabled = managedAdsSettings != [];
   adsSettingsManifest = pkgs.writeText "amp-ads-settings.tsv" (
     lib.concatMapStringsSep "\n" (setting:
@@ -326,6 +331,65 @@
         fi
         sleep 1
       done
+    }
+
+    read_setting() {
+      file="$1"
+      key="$2"
+      test -r "$file" || return 13
+      awk -v key="$key" '
+        /^[[:space:]]*($|#)/ { next }
+        index($0, "=") == 0 { malformed = 1; next }
+        {
+          candidate = substr($0, 1, index($0, "=") - 1)
+          if (candidate == key) {
+            count++
+            value = substr($0, index($0, "=") + 1)
+          }
+        }
+        END {
+          if (malformed) exit 12
+          if (count == 0) exit 10
+          if (count > 1) exit 11
+          print value
+        }
+      ' "$file"
+    }
+
+    set_file_setting() {
+      file="$1"
+      key="$2"
+      desired="$3"
+
+      if actual="$(read_setting "$file" "$key")"; then
+        test "$actual" != "$desired" || return 0
+      else
+        result=$?
+        if test "$result" -ne 10; then
+          echo "Cannot safely write $key in $file" >&2
+          return 1
+        fi
+      fi
+
+      temporary="$(mktemp "$file.nix-amp.XXXXXX")"
+      if ! awk -v key="$key" -v value="$desired" '
+        BEGIN { found = 0 }
+        index($0, "=") > 0 &&
+          substr($0, 1, index($0, "=") - 1) == key {
+          if (!found) print key "=" value
+          found = 1
+          next
+        }
+        { print }
+        END {
+          if (!found) print key "=" value
+        }
+      ' "$file" > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+      fi
+      chmod --reference="$file" "$temporary"
+      mv "$temporary" "$file"
     }
   '';
 
@@ -432,7 +496,7 @@
           "+${setting.provisioningKey}"
           setting.value
         ])
-      managedAdsSettings}
+      reconfigurableAdsSettings}
         )
 
         run_amp "''${arguments[@]}"
@@ -460,6 +524,20 @@
         run_amp reactivate ADS01 "$licence"
         unset licence
       fi
+
+      # AMP 2.8 accepts this provisioning key but does not persist it through
+      # create or reconfigureinstance. Update its ordinary KVP file only while
+      # ADS is stopped, using the same strict parser as drift detection.
+      ${lib.optionalString (cfg.ads.settings.enablePassthruAuth != null) ''
+        read_status
+        if ads_running; then
+          run_amp stopinstance ADS01
+        fi
+        set_file_setting \
+          "$instance/AMPConfig.conf" \
+          Security.EnablePassthruAuth \
+          ${lib.escapeShellArg (formatAdsValue cfg.ads.settings.enablePassthruAuth)}
+      ''}
 
       read_status
       if ! ads_running; then
@@ -492,44 +570,31 @@
         exit 0
       fi
 
-      # Return codes distinguish a missing key (10) from duplicate, malformed,
-      # or unreadable configuration (11-13), which cannot be changed safely.
-      read_setting() {
-        file="$1"
-        key="$2"
-        test -r "$file" || return 13
-        awk -v key="$key" '
-          /^[[:space:]]*($|#)/ { next }
-          index($0, "=") == 0 { malformed = 1; next }
-          {
-            candidate = substr($0, 1, index($0, "=") - 1)
-            if (candidate == key) {
-              count++
-              value = substr($0, index($0, "=") + 1)
-            }
-          }
-          END {
-            if (malformed) exit 12
-            if (count == 0) exit 10
-            if (count > 1) exit 11
-            print value
-          }
-        ' "$file"
-      }
-
       arguments=(reconfigureinstance ADS01)
       drift=0
+      passthru_drift=0
+      passthru_desired=
       while IFS=$'\t' read -r provisioning_key target_file target_key desired; do
         if actual="$(read_setting "$instance/$target_file" "$target_key")"; then
           if test "$actual" != "$desired"; then
-            arguments+=("+$provisioning_key" "$desired")
+            if test "$provisioning_key" = ${lib.escapeShellArg passthruAuthProvisioningKey}; then
+              passthru_drift=1
+              passthru_desired="$desired"
+            else
+              arguments+=("+$provisioning_key" "$desired")
+            fi
             drift=1
           fi
         else
           result=$?
           case "$result" in
             10)
-              arguments+=("+$provisioning_key" "$desired")
+              if test "$provisioning_key" = ${lib.escapeShellArg passthruAuthProvisioningKey}; then
+                passthru_drift=1
+                passthru_desired="$desired"
+              else
+                arguments+=("+$provisioning_key" "$desired")
+              fi
               drift=1
               ;;
             *)
@@ -565,7 +630,16 @@
           ${ampinstmgrServiceExe} stopinstance ADS01 9>&-
       fi
 
-      run_amp "''${arguments[@]}"
+      if test "$passthru_drift" -eq 1; then
+        set_file_setting \
+          "$instance/AMPConfig.conf" \
+          Security.EnablePassthruAuth \
+          "$passthru_desired"
+      fi
+
+      if test "''${#arguments[@]}" -gt 2; then
+        run_amp "''${arguments[@]}"
+      fi
 
       # AMP returning successfully is not sufficient; verify every written key.
       while IFS=$'\t' read -r _ target_file target_key desired; do
