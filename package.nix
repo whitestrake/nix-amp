@@ -87,14 +87,14 @@
 in
   stdenv.mkDerivation (finalAttrs: {
     pname = "ampinstmgr";
-    version = "2.8.0.4";
+    version = "2.8.0.8";
 
     src = fetchurl {
       urls = [
         "https://github.com/whitestrake/nix-amp/releases/download/upstream-ampinstmgr-${finalAttrs.version}/ampinstmgr-${finalAttrs.version}.x86_64.tgz"
         "https://repo.cubecoders.com/ampinstmgr-${finalAttrs.version}.x86_64.tgz"
       ];
-      hash = "sha256-JFqSOyig3q/o5Y+0K7WsS0MEWnVD3SP1auA92qNYwpo=";
+      hash = "sha256-ClZFvTGRSl42FYJcDiWDZ0BCgXCqq0AcyyriEq0ikbk=";
     };
 
     sourceRoot = ".";
