@@ -11,9 +11,10 @@ required to run AMP. The upstream binary remains governed by the
 ## Status
 
 - Project status: experimental.
-- Supported target: x86_64 NixOS 26.05.
+- CI tests against a weekly snapshot of unstable nixpkgs, refreshed with each AMP
+  release. Consumers should have `nix-amp` follow their own nixpkgs.
 - The AMP manager, its ADS management instance, and Satisfactory servers have
-  been successfully tested on NixOS with rootless Podman.
+  been successfully tested on x86_64 NixOS with rootless Podman.
 
 ## NixOS module
 
