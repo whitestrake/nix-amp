@@ -98,6 +98,32 @@ jobs:
             echo "formatting changed more than version and hash" >&2
             exit 1
           fi
+
+          # Refresh nixpkgs alongside each AMP release so the lock used for CI
+          # keeps pace with upstream releases without separate update PRs.
+          cp flake.lock "$RUNNER_TEMP/flake.lock.orig"
+          old_rev=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
+          nix flake update nixpkgs
+          new_rev=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
+
+          if jq -e \
+            --slurpfile old "$RUNNER_TEMP/flake.lock.orig" \
+            'del(.nodes.nixpkgs.locked) != ($old[0] | del(.nodes.nixpkgs.locked))' \
+            flake.lock >/dev/null; then
+            echo "flake update changed more than the nixpkgs lock" >&2
+            exit 1
+          fi
+
+          status=$(git status --porcelain=v1 --untracked-files=all)
+          if test "$old_rev" = "$new_rev"; then
+            test "$status" = " M package.nix"
+            nixpkgs="nixpkgs is unchanged at \`${new_rev:0:12}\`."
+          else
+            test "$status" = "$(printf ' M flake.lock\n M package.nix')"
+            nixpkgs="Updates nixpkgs from \`${old_rev:0:12}\` to \`${new_rev:0:12}\`."
+          fi
+
+          echo "nixpkgs=$nixpkgs" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Verify and mirror the TGZ
@@ -174,6 +200,8 @@ jobs:
 
             The upstream TGZ was downloaded twice, compared byte-for-byte,
             and mirrored unchanged as a GitHub Release asset.
+
+            ${{ steps.update.outputs.nixpkgs }}
           labels: dependencies
 
       - name: Require successful checks

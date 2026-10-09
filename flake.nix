@@ -1,7 +1,7 @@
 {
   description = "Unofficial Nix package and NixOS module for CubeCoders AMP";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.nixpkgs.url = "https://flakehub.com/f/DeterminateSystems/nixpkgs-weekly/0.1";
 
   outputs = {
     self,
