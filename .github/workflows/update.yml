@@ -31,34 +31,23 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Discover and download the latest TGZ
+      - name: Resolve the latest signed release
         id: release
         run: |
           set -euo pipefail
 
-          lister=$(
-            nix build .#packages.x86_64-linux.ampinstmgr.versionLister \
+          resolver=$(
+            nix build .#packages.x86_64-linux.ampinstmgr.releaseResolver \
               --no-link \
               --print-out-paths
           )
-          version=$("$lister" | tail -n 1)
+          "$resolver" > "$RUNNER_TEMP/release"
+
+          version=$(sed -n 's/^version=//p' "$RUNNER_TEMP/release")
           [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]
 
-          asset="ampinstmgr-$version.x86_64.tgz"
-          mkdir "$RUNNER_TEMP/upstream" "$RUNNER_TEMP/verification"
-
-          curl -fsSL \
-            "https://repo.cubecoders.com/$asset" \
-            -o "$RUNNER_TEMP/upstream/$asset"
-          curl -fsSL \
-            "https://repo.cubecoders.com/$asset" \
-            -o "$RUNNER_TEMP/verification/$asset"
-          cmp \
-            "$RUNNER_TEMP/upstream/$asset" \
-            "$RUNNER_TEMP/verification/$asset"
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/release" >> "$GITHUB_OUTPUT"
+          echo "asset=ampinstmgr-$version.x86_64.deb" >> "$GITHUB_OUTPUT"
 
       - name: Update package
         id: update
@@ -85,8 +74,8 @@ jobs:
           test "$status" = " M package.nix"
           if git diff --unified=0 -- package.nix |
             grep -E '^[+-]' |
-            grep -Ev '^(\+\+\+|---|[+-][[:space:]]+(version|hash)[[:space:]]*=)'; then
-            echo "nix-update changed more than version and hash" >&2
+            grep -Ev '^(\+\+\+|---|[+-][[:space:]]+(version|hash|srcFormat)[[:space:]]*=)'; then
+            echo "nix-update changed more than version, hash and format" >&2
             exit 1
           fi
 
@@ -94,8 +83,8 @@ jobs:
           test "$(git status --porcelain=v1 --untracked-files=all)" = " M package.nix"
           if git diff --unified=0 -- package.nix |
             grep -E '^[+-]' |
-            grep -Ev '^(\+\+\+|---|[+-][[:space:]]+(version|hash)[[:space:]]*=)'; then
-            echo "formatting changed more than version and hash" >&2
+            grep -Ev '^(\+\+\+|---|[+-][[:space:]]+(version|hash|srcFormat)[[:space:]]*=)'; then
+            echo "formatting changed more than version, hash and format" >&2
             exit 1
           fi
 
@@ -126,11 +115,14 @@ jobs:
           echo "nixpkgs=$nixpkgs" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Verify and mirror the TGZ
+      - name: Verify and mirror the .deb
         id: mirror
+        if: steps.update.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERSION: ${{ steps.release.outputs.version }}
+          URL: ${{ steps.release.outputs.url }}
+          SHA256: ${{ steps.release.outputs.sha256 }}
           ASSET: ${{ steps.release.outputs.asset }}
         run: |
           set -euo pipefail
@@ -138,10 +130,18 @@ jobs:
           test "$(
             sed -n 's/^[[:space:]]*version = "\([^"]*\)";$/\1/p' package.nix
           )" = "$VERSION"
+          grep -Fxq '  srcFormat = "deb";' package.nix
           expected=$(
             sed -n 's/^[[:space:]]*hash = "\(sha256-[^"]*\)";$/\1/p' package.nix
           )
           test -n "$expected"
+
+          # The SHA256 comes from the Packages index the resolver verified
+          # against CubeCoders' signed InRelease.
+          mkdir "$RUNNER_TEMP/upstream"
+          curl -fsSL "$URL" -o "$RUNNER_TEMP/upstream/$ASSET"
+          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/upstream/$ASSET" |
+            sha256sum --check --strict
           test "$(nix hash file "$RUNNER_TEMP/upstream/$ASSET")" = "$expected"
 
           tag="upstream-ampinstmgr-$VERSION"
@@ -163,7 +163,7 @@ jobs:
               --draft \
               --target "$(git rev-parse HEAD)" \
               --title "AMP Instance Manager $VERSION" \
-              --notes "Unmodified CubeCoders AMP Instance Manager x86_64 TGZ."
+              --notes "Unmodified CubeCoders AMP Instance Manager amd64 .deb, verified against the signed CubeCoders apt repository."
             gh release download "$tag" \
               --pattern "$ASSET" \
               --dir "$RUNNER_TEMP/existing"
@@ -198,8 +198,9 @@ jobs:
           body: |
             Updates AMP Instance Manager to `${{ steps.release.outputs.version }}`.
 
-            The upstream TGZ was downloaded twice, compared byte-for-byte,
-            and mirrored unchanged as a GitHub Release asset.
+            The upstream .deb matched the SHA256 in CubeCoders' signed apt
+            repository index (key `50ED69D7E73CBCF4FB97910C33FB60CD1A773489`)
+            and was mirrored unchanged as a GitHub Release asset.
 
             ${{ steps.update.outputs.nixpkgs }}
           labels: dependencies

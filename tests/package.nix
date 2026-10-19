@@ -6,6 +6,7 @@
     pkgs.runCommand "ampinstmgr-package-contract"
     {
       nativeBuildInputs = with pkgs; [
+        dpkg
         file
         glibc.bin
         gzip
@@ -20,7 +21,11 @@
       # Upstream archive shape and integration files
       archive="$TMPDIR/archive"
       mkdir "$archive"
-      tar -xzf ${ampinstmgr.src} -C "$archive"
+      ${
+        if ampinstmgr.srcFormat == "deb"
+        then "dpkg-deb -x ${ampinstmgr.src} \"$archive\""
+        else "tar -xzf ${ampinstmgr.src} -C \"$archive\""
+      }
       cd "$archive"
 
       required=(
