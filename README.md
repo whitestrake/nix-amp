@@ -349,8 +349,14 @@ migration complete.
 
 ### Updating
 
-The manager package is pinned by version and hash. Update the flake input and
-rebuild NixOS:
+The manager package is pinned by version and hash. New releases are taken from
+CubeCoders' signed apt repository: the updater verifies its `InRelease` against
+the pinned key in `cubecoders-archive-key.asc` (fingerprint
+`50ED69D7E73CBCF4FB97910C33FB60CD1A773489`) and checks the archive against the
+signed index. CubeCoders publishes only the current release, so each pinned
+archive is mirrored unchanged as a GitHub Release asset.
+
+Update the flake input and rebuild NixOS:
 
 ```console
 nix flake update nix-amp
