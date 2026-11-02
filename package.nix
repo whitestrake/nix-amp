@@ -30,7 +30,7 @@
 }: let
   # Archive format of the pinned release. The updater switches it to "deb" with
   # the first version bump taken from CubeCoders' signed apt repository.
-  srcFormat = "tgz";
+  srcFormat = "deb";
 
   # CubeCoders' apt repository signing key, pinned by fingerprint. A rotated key
   # fails here and needs a reviewed change to cubecoders-archive-key.asc.
@@ -168,14 +168,14 @@
 in
   stdenv.mkDerivation (finalAttrs: {
     pname = "ampinstmgr";
-    version = "2.8.0.8";
+    version = "2.8.0.10";
 
     src = fetchurl {
       urls = [
         "https://github.com/whitestrake/nix-amp/releases/download/upstream-ampinstmgr-${finalAttrs.version}/ampinstmgr-${finalAttrs.version}.x86_64.${srcFormat}"
         "https://repo.cubecoders.com/ampinstmgr-${finalAttrs.version}.x86_64.${srcFormat}"
       ];
-      hash = "sha256-ClZFvTGRSl42FYJcDiWDZ0BCgXCqq0AcyyriEq0ikbk=";
+      hash = "sha256-BAFpPameG75ilFtb/UbR1EpRnVy+rohdkz8PkBt9osQ=";
     };
 
     sourceRoot = ".";
